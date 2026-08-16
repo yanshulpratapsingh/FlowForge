@@ -56,6 +56,9 @@ public class Job {
     @Column(name = "last_failed_at")
     private LocalDateTime lastFailedAt;
 
+    @Column(name = "type", nullable = false)
+    private String type = "SIMULATED";
+
     public Job() {
     }
 
@@ -198,5 +201,13 @@ public class Job {
 
     public void setLastFailedAt(LocalDateTime lastFailedAt) {
         this.lastFailedAt = lastFailedAt;
+    }
+
+    public String getType() {
+        return type;
+    }
+
+    public void setType(String type) {
+        this.type = type;
     }
 }

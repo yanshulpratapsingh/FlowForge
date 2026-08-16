@@ -19,6 +19,8 @@ public class CreateJobRequest {
     @Min(0)
     private Integer maxRetries;
 
+    private String type;
+
     public CreateJobRequest() {
     }
 
@@ -52,5 +54,13 @@ public class CreateJobRequest {
 
     public void setMaxRetries(Integer maxRetries) {
         this.maxRetries = maxRetries;
+    }
+
+    public String getType() {
+        return type;
+    }
+
+    public void setType(String type) {
+        this.type = type;
     }
 }

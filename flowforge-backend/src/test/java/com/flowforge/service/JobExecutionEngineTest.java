@@ -26,6 +26,12 @@ public class JobExecutionEngineTest {
     @Autowired
     private JobRepository jobRepository;
 
+    @Autowired
+    private JobHandlerRegistry registry;
+
+    @Autowired
+    private HandlerRoutingJobExecutor routingExecutor;
+
     @AfterEach
     public void cleanUp() {
         jobRepository.deleteAll();
@@ -362,5 +368,158 @@ public class JobExecutionEngineTest {
         // Heartbeat must fail after completion (affect 0 rows)
         boolean hb2 = jobService.extendLease(claimedJob.getId(), "worker-1");
         assertFalse(hb2);
+    }
+
+    @Test
+    public void testRegistryDiscoversSimulatedJobHandler() {
+        JobHandler handler = registry.getHandler("SIMULATED");
+        assertNotNull(handler);
+        assertTrue(handler instanceof SimulatedJobHandler);
+    }
+
+    @Test
+    public void testCaseInsensitiveHandlerLookup() {
+        JobHandler h1 = registry.getHandler("simulated");
+        JobHandler h2 = registry.getHandler("Simulated");
+        JobHandler h3 = registry.getHandler("SIMULATED");
+        assertNotNull(h1);
+        assertSame(h1, h2);
+        assertSame(h2, h3);
+    }
+
+    @Test
+    public void testUnknownHandlerTypeProducesClearFailure() {
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> {
+            registry.getHandler("NON_EXISTENT_TYPE");
+        });
+        assertTrue(ex.getMessage().contains("No handler registered for job type: NON_EXISTENT_TYPE"));
+    }
+
+    @Test
+    public void testDuplicateHandlerTypeRegistrationIsRejected() {
+        JobHandler dup = new JobHandler() {
+            @Override
+            public String getJobType() {
+                return "SIMULATED";
+            }
+            @Override
+            public void handle(Job job) throws Exception {}
+        };
+        IllegalStateException ex = assertThrows(IllegalStateException.class, () -> {
+            registry.register(dup);
+        });
+        assertTrue(ex.getMessage().contains("Duplicate handler registration for type: SIMULATED"));
+    }
+
+    @Test
+    public void testSimulatedJobExecutesExactlyAsBefore() throws Exception {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-simulated");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("sleep:10"); // fast sleep
+        req.setType("SIMULATED");
+
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        Job claimedJob = claimed.get(0);
+
+        routingExecutor.execute(claimedJob); // runs simulated logic
+    }
+
+    @Test
+    public void testCustomTestHandlerSuccessfullyExecutes() throws Exception {
+        String uniqueType = "CUSTOM_TEST_" + java.util.UUID.randomUUID().toString().replace("-", "").toUpperCase();
+        java.util.concurrent.atomic.AtomicBoolean called = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        registry.register(new JobHandler() {
+            @Override
+            public String getJobType() {
+                return uniqueType;
+            }
+            @Override
+            public void handle(Job job) throws Exception {
+                called.set(true);
+            }
+        });
+
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-custom");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setType(uniqueType);
+
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        Job claimedJob = claimed.get(0);
+
+        routingExecutor.execute(claimedJob);
+        assertTrue(called.get());
+    }
+
+    @Test
+    public void testCustomHandlerFailureAndRetryExhaustion() {
+        String uniqueType = "CUSTOM_FAIL_" + java.util.UUID.randomUUID().toString().replace("-", "").toUpperCase();
+
+        registry.register(new JobHandler() {
+            @Override
+            public String getJobType() {
+                return uniqueType;
+            }
+            @Override
+            public void handle(Job job) throws Exception {
+                throw new RuntimeException("custom logic failure");
+            }
+        });
+
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-custom-fail");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setType(uniqueType);
+
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        // Attempt 1
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        Job claimedJob = claimed.get(0);
+
+        // Execute routingExecutor inside execution context simulation
+        try {
+            routingExecutor.execute(claimedJob);
+            fail("Expected execution failure");
+        } catch (Exception e) {
+            jobService.handleFailure(claimedJob.getId(), "worker-1", e.getMessage());
+        }
+
+        Job state1 = jobService.getJobById(claimedJob.getId());
+        assertEquals(JobStatus.RETRYING, state1.getStatus());
+        assertEquals(1, state1.getRetryCount());
+        assertEquals("custom logic failure", state1.getLastErrorMessage());
+
+        // Set scheduledAt in past
+        state1.setScheduledAt(LocalDateTime.now().minusSeconds(1));
+        jobRepository.saveAndFlush(state1);
+
+        // Attempt 2 (Retry limit exhausted)
+        List<Job> claimed2 = jobService.claimExecutableJobs(1, "worker-2");
+        Job claimedJob2 = claimed2.get(0);
+
+        try {
+            routingExecutor.execute(claimedJob2);
+            fail("Expected execution failure");
+        } catch (Exception e) {
+            jobService.handleFailure(claimedJob2.getId(), "worker-2", e.getMessage());
+        }
+
+        Job state2 = jobService.getJobById(claimedJob2.getId());
+        assertEquals(JobStatus.DEAD_LETTER, state2.getStatus());
+        assertEquals(2, state2.getRetryCount());
+        assertEquals("custom logic failure", state2.getLastErrorMessage());
     }
 }

@@ -49,6 +49,12 @@ public class JobService {
         job.setRetryCount(0);
         job.setMaxRetries(request.getMaxRetries());
 
+        String type = request.getType();
+        if (type == null || type.trim().isEmpty()) {
+            type = "SIMULATED";
+        }
+        job.setType(type.toUpperCase());
+
         LocalDateTime now = LocalDateTime.now();
 
         job.setCreatedAt(now);

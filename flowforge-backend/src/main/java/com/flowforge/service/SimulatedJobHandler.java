@@ -6,12 +6,17 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 @Component
-public class SimulatedJobExecutor implements JobExecutor {
+public class SimulatedJobHandler implements JobHandler {
 
-    private static final Logger log = LoggerFactory.getLogger(SimulatedJobExecutor.class);
+    private static final Logger log = LoggerFactory.getLogger(SimulatedJobHandler.class);
 
     @Override
-    public void execute(Job job) throws Exception {
+    public String getJobType() {
+        return "SIMULATED";
+    }
+
+    @Override
+    public void handle(Job job) throws Exception {
         log.info("Worker started - [Thread: {}] - Job ID: {}, Name: {}",
                 Thread.currentThread().getName(), job.getId(), job.getName());
 
