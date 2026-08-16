@@ -44,19 +44,27 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
                       @Param("now") LocalDateTime now);
 
     @Modifying
-    @Query("UPDATE Job j SET j.status = 'RETRYING', j.retryCount = :retryCount, j.scheduledAt = :scheduledAt, j.updatedAt = :now " +
+    @Query("UPDATE Job j SET j.status = 'RETRYING', j.retryCount = :retryCount, j.scheduledAt = :scheduledAt, " +
+           "j.lastErrorMessage = :errorMessage, j.lastFailedAt = :failedAt, j.updatedAt = :now, " +
+           "j.workerId = null, j.leaseUntil = null, j.startedAt = null " +
            "WHERE j.id = :id AND j.status = 'RUNNING' AND j.workerId = :workerId")
     int markRetrying(@Param("id") UUID id, 
                      @Param("workerId") String workerId, 
                      @Param("retryCount") int retryCount, 
                      @Param("scheduledAt") LocalDateTime scheduledAt, 
+                     @Param("errorMessage") String errorMessage, 
+                     @Param("failedAt") LocalDateTime failedAt, 
                      @Param("now") LocalDateTime now);
 
     @Modifying
-    @Query("UPDATE Job j SET j.status = 'DEAD_LETTER', j.retryCount = :retryCount, j.updatedAt = :now " +
+    @Query("UPDATE Job j SET j.status = 'DEAD_LETTER', j.retryCount = :retryCount, " +
+           "j.lastErrorMessage = :errorMessage, j.lastFailedAt = :failedAt, j.updatedAt = :now, " +
+           "j.workerId = null, j.leaseUntil = null, j.startedAt = null " +
            "WHERE j.id = :id AND j.status = 'RUNNING' AND j.workerId = :workerId")
     int markDeadLetter(@Param("id") UUID id, 
                        @Param("workerId") String workerId, 
                        @Param("retryCount") int retryCount, 
+                       @Param("errorMessage") String errorMessage, 
+                       @Param("failedAt") LocalDateTime failedAt, 
                        @Param("now") LocalDateTime now);
 }

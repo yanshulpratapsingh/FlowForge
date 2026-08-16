@@ -127,21 +127,26 @@ public class JobService {
         int currentRetry = job.getRetryCount() + 1;
 
         LocalDateTime now = LocalDateTime.now();
+        String finalError = errorMessage != null ? errorMessage : "Unknown error";
+        if (finalError.length() > 2000) {
+            finalError = finalError.substring(0, 1997) + "...";
+        }
+
         if (currentRetry <= job.getMaxRetries()) {
             long delayMs = baseDelayMs * (long) Math.pow(2, currentRetry - 1);
             LocalDateTime scheduledAt = now.plus(Duration.ofMillis(delayMs));
-            int updated = jobRepository.markRetrying(id, workerId, currentRetry, scheduledAt, now);
+            int updated = jobRepository.markRetrying(id, workerId, currentRetry, scheduledAt, finalError, now, now);
             if (updated > 0) {
                 log.info("Retry scheduled - Job ID: {} - Attempt #{} failed. Next retry in {}ms. Error: {}",
-                        id, currentRetry, delayMs, errorMessage);
+                        id, currentRetry, delayMs, finalError);
             } else {
                 log.warn("Stale worker failure update rejected (lease expired or already recovered) - Job ID: {}, Worker: {}", id, workerId);
             }
         } else {
-            int updated = jobRepository.markDeadLetter(id, workerId, currentRetry, now);
+            int updated = jobRepository.markDeadLetter(id, workerId, currentRetry, finalError, now, now);
             if (updated > 0) {
                 log.error("Job moved to DEAD_LETTER - Job ID: {} - Max retries ({}) exceeded. Error: {}",
-                        id, job.getMaxRetries(), errorMessage);
+                        id, job.getMaxRetries(), finalError);
             } else {
                 log.warn("Stale worker failure update rejected (lease expired or already recovered) - Job ID: {}, Worker: {}", id, workerId);
             }

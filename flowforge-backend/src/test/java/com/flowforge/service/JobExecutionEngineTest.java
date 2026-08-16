@@ -14,7 +14,10 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-@SpringBootTest
+@SpringBootTest(properties = {
+    "flowforge.scheduler.poll-interval-ms=3600000",
+    "flowforge.worker.recovery-interval-ms=3600000"
+})
 public class JobExecutionEngineTest {
 
     @Autowired
@@ -204,5 +207,160 @@ public class JobExecutionEngineTest {
         Job afterFailure = jobService.getJobById(claimedJob.getId());
         assertEquals(JobStatus.QUEUED, afterFailure.getStatus()); // remains QUEUED
         assertEquals(0, afterFailure.getRetryCount());
+    }
+
+    @Test
+    public void testRetryExhaustion() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-retry-exhaustion");
+        req.setPriority(1);
+        req.setMaxRetries(2);
+        req.setPayload("payload");
+
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        // Attempt 1
+        List<Job> claimed1 = jobService.claimExecutableJobs(1, "worker-1");
+        Job job1 = claimed1.get(0);
+        jobService.handleFailure(job1.getId(), "worker-1", "error 1");
+
+        Job state1 = jobService.getJobById(job1.getId());
+        assertEquals(JobStatus.RETRYING, state1.getStatus());
+        assertNull(state1.getWorkerId());
+        assertEquals(1, state1.getRetryCount());
+        assertEquals("error 1", state1.getLastErrorMessage());
+        assertNotNull(state1.getLastFailedAt());
+
+        // Force scheduled time to be in the past for Attempt 2 eligibility
+        state1.setScheduledAt(LocalDateTime.now().minusSeconds(1));
+        jobRepository.saveAndFlush(state1);
+
+        // Attempt 2
+        List<Job> claimed2 = jobService.claimExecutableJobs(1, "worker-2");
+        Job job2 = claimed2.get(0);
+        jobService.handleFailure(job2.getId(), "worker-2", "error 2");
+
+        Job state2 = jobService.getJobById(job2.getId());
+        assertEquals(JobStatus.RETRYING, state2.getStatus());
+        assertNull(state2.getWorkerId());
+        assertEquals(2, state2.getRetryCount());
+        assertEquals("error 2", state2.getLastErrorMessage());
+
+        // Force scheduled time in the past for Attempt 3 eligibility
+        state2.setScheduledAt(LocalDateTime.now().minusSeconds(1));
+        jobRepository.saveAndFlush(state2);
+
+        // Attempt 3 (Retry limit exhausted, since currentRetry (3) > maxRetries (2))
+        List<Job> claimed3 = jobService.claimExecutableJobs(1, "worker-3");
+        Job job3 = claimed3.get(0);
+        jobService.handleFailure(job3.getId(), "worker-3", "error 3");
+
+        Job state3 = jobService.getJobById(job3.getId());
+        assertEquals(JobStatus.DEAD_LETTER, state3.getStatus());
+        assertNull(state3.getWorkerId());
+        assertEquals(3, state3.getRetryCount());
+        assertEquals("error 3", state3.getLastErrorMessage());
+
+        // Verify that re-claiming is impossible
+        List<Job> claimed4 = jobService.claimExecutableJobs(1, "worker-4");
+        assertTrue(claimed4.isEmpty());
+
+        // Verify that terminal state prevents transitions
+        assertThrows(IllegalStateException.class, () -> state3.transitionTo(JobStatus.RUNNING));
+    }
+
+    @Test
+    public void testRetryScheduling() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-retry-scheduling");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("payload");
+
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        List<Job> claimed1 = jobService.claimExecutableJobs(1, "worker-1");
+        Job job1 = claimed1.get(0);
+        jobService.handleFailure(job1.getId(), "worker-1", "first fail");
+
+        // Job is in RETRYING, scheduledAt is in the future. It must NOT be claimable.
+        List<Job> claimedFuture = jobService.claimExecutableJobs(1, "worker-2");
+        assertTrue(claimedFuture.isEmpty());
+
+        // Manually move scheduledAt to the past
+        Job retryingJob = jobService.getJobById(job1.getId());
+        retryingJob.setScheduledAt(LocalDateTime.now().minusSeconds(10));
+        jobRepository.saveAndFlush(retryingJob);
+
+        // Now it must be claimable
+        List<Job> claimedPast = jobService.claimExecutableJobs(1, "worker-2");
+        assertEquals(1, claimedPast.size());
+        assertEquals("worker-2", claimedPast.get(0).getWorkerId());
+    }
+
+    @Test
+    public void testFailureInformationPersistenceAndTruncation() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-failure-info");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("payload");
+
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        Job claimedJob = claimed.get(0);
+
+        // Massive string > 2000 chars
+        String massiveMessage = "A".repeat(2500);
+        jobService.handleFailure(claimedJob.getId(), "worker-1", massiveMessage);
+
+        Job failedJob = jobService.getJobById(claimedJob.getId());
+        assertNotNull(failedJob.getLastFailedAt());
+        assertEquals(2000, failedJob.getLastErrorMessage().length());
+        assertTrue(failedJob.getLastErrorMessage().endsWith("..."));
+        assertTrue(failedJob.getLastErrorMessage().startsWith("AAA"));
+
+        // Move back to running to fail it again with null error message
+        failedJob.setScheduledAt(LocalDateTime.now().minusSeconds(1));
+        jobRepository.saveAndFlush(failedJob);
+
+        List<Job> claimed2 = jobService.claimExecutableJobs(1, "worker-2");
+        Job claimedJob2 = claimed2.get(0);
+        jobService.handleFailure(claimedJob2.getId(), "worker-2", null);
+
+        Job failedJob2 = jobService.getJobById(claimedJob2.getId());
+        assertEquals("Unknown error", failedJob2.getLastErrorMessage());
+    }
+
+    @Test
+    public void testHeartbeatCancellationAfterCompletion() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-hb-cancellation");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("payload");
+
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        Job claimedJob = claimed.get(0);
+
+        // Heartbeat should succeed while running
+        boolean hb1 = jobService.extendLease(claimedJob.getId(), "worker-1");
+        assertTrue(hb1);
+
+        // Complete job
+        jobService.handleSuccess(claimedJob.getId(), "worker-1");
+        Job completedJob = jobService.getJobById(claimedJob.getId());
+        assertEquals(JobStatus.COMPLETED, completedJob.getStatus());
+
+        // Heartbeat must fail after completion (affect 0 rows)
+        boolean hb2 = jobService.extendLease(claimedJob.getId(), "worker-1");
+        assertFalse(hb2);
     }
 }

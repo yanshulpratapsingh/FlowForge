@@ -50,6 +50,12 @@ public class Job {
     @Column(name = "started_at")
     private LocalDateTime startedAt;
 
+    @Column(name = "last_error_message", columnDefinition = "TEXT")
+    private String lastErrorMessage;
+
+    @Column(name = "last_failed_at")
+    private LocalDateTime lastFailedAt;
+
     public Job() {
     }
 
@@ -176,5 +182,21 @@ public class Job {
 
     public void setStartedAt(LocalDateTime startedAt) {
         this.startedAt = startedAt;
+    }
+
+    public String getLastErrorMessage() {
+        return lastErrorMessage;
+    }
+
+    public void setLastErrorMessage(String lastErrorMessage) {
+        this.lastErrorMessage = lastErrorMessage;
+    }
+
+    public LocalDateTime getLastFailedAt() {
+        return lastFailedAt;
+    }
+
+    public void setLastFailedAt(LocalDateTime lastFailedAt) {
+        this.lastFailedAt = lastFailedAt;
     }
 }
