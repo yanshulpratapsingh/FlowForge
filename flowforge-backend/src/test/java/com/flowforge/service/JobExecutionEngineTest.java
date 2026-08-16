@@ -32,6 +32,19 @@ public class JobExecutionEngineTest {
     @Autowired
     private HandlerRoutingJobExecutor routingExecutor;
 
+    @Autowired
+    private JobExecutionEngine engine;
+
+    @Autowired
+    private com.flowforge.controller.JobController jobController;
+
+    private org.springframework.test.web.servlet.MockMvc mockMvc;
+
+    @org.junit.jupiter.api.BeforeEach
+    public void setup() {
+        this.mockMvc = org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(jobController).build();
+    }
+
     @AfterEach
     public void cleanUp() {
         jobRepository.deleteAll();
@@ -521,5 +534,333 @@ public class JobExecutionEngineTest {
         assertEquals(JobStatus.DEAD_LETTER, state2.getStatus());
         assertEquals(2, state2.getRetryCount());
         assertEquals("custom logic failure", state2.getLastErrorMessage());
+    }
+
+    @Test
+    public void testCancelQueuedJob() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-cancel-queued");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("payload");
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        Job cancelled = jobService.cancelJob(job.getId());
+        assertEquals(JobStatus.CANCELLED, cancelled.getStatus());
+        assertNull(cancelled.getWorkerId());
+        assertNull(cancelled.getLeaseUntil());
+        assertNull(cancelled.getStartedAt());
+        assertNull(cancelled.getScheduledAt());
+    }
+
+    @Test
+    public void testCancelRetryingJob() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-cancel-retrying");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("payload");
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        jobService.handleFailure(claimed.get(0).getId(), "worker-1", "err");
+
+        Job retrying = jobService.getJobById(job.getId());
+        assertEquals(JobStatus.RETRYING, retrying.getStatus());
+
+        Job cancelled = jobService.cancelJob(job.getId());
+        assertEquals(JobStatus.CANCELLED, cancelled.getStatus());
+
+        // Assert it cannot be claimed
+        List<Job> claimedAfter = jobService.claimExecutableJobs(1, "worker-2");
+        assertTrue(claimedAfter.isEmpty());
+    }
+
+    @Test
+    public void testCancelRunningJobLocal() throws Exception {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-cancel-running-local");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("sleep:5000"); // 5s sleep to keep it active
+        req.setType("SIMULATED");
+
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        engine.pollAndExecute();
+
+        // Deterministic check loop to verify job enters RUNNING state
+        int limit = 100;
+        Job runningJob = jobService.getJobById(job.getId());
+        while (runningJob.getStatus() != JobStatus.RUNNING && limit > 0) {
+            Thread.sleep(10);
+            runningJob = jobService.getJobById(job.getId());
+            limit--;
+        }
+        assertEquals(JobStatus.RUNNING, runningJob.getStatus());
+
+        // Cancel job
+        jobService.cancelJob(job.getId());
+
+        Job cancelledJob = jobService.getJobById(job.getId());
+        assertEquals(JobStatus.CANCELLED, cancelledJob.getStatus());
+
+        // Wait a tiny moment to let the interrupted exception log and ensure retryCount stays 0
+        Thread.sleep(100);
+        Job finalJob = jobService.getJobById(job.getId());
+        assertEquals(0, finalJob.getRetryCount());
+        assertEquals(JobStatus.CANCELLED, finalJob.getStatus());
+    }
+
+    @Test
+    public void testCancelRunningJobRemote() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-cancel-running-remote");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("payload");
+
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-remote");
+        Job claimedJob = claimed.get(0);
+        assertEquals("worker-remote", claimedJob.getWorkerId());
+
+        // Cancel the job remotely
+        jobService.cancelJob(claimedJob.getId());
+
+        Job cancelledJob = jobService.getJobById(claimedJob.getId());
+        assertEquals(JobStatus.CANCELLED, cancelledJob.getStatus());
+        assertNull(cancelledJob.getWorkerId());
+
+        // Now simulate remote heartbeat failing
+        boolean success = jobService.extendLease(claimedJob.getId(), "worker-remote");
+        assertFalse(success);
+
+        // Heartbeat logic reads status and realizes it was CANCELLED
+        Job dbJob = jobService.getJobById(claimedJob.getId());
+        assertEquals(JobStatus.CANCELLED, dbJob.getStatus());
+    }
+
+    @Test
+    public void testCancelAlreadyCancelledJob() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-cancel-idempotent");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("payload");
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        Job cancelled1 = jobService.cancelJob(job.getId());
+        assertEquals(JobStatus.CANCELLED, cancelled1.getStatus());
+
+        Job cancelled2 = jobService.cancelJob(job.getId());
+        assertEquals(JobStatus.CANCELLED, cancelled2.getStatus());
+    }
+
+    @Test
+    public void testCannotCancelCompletedJob() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-no-cancel-completed");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("payload");
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        jobService.handleSuccess(claimed.get(0).getId(), "worker-1");
+
+        Job completed = jobService.getJobById(job.getId());
+        assertEquals(JobStatus.COMPLETED, completed.getStatus());
+
+        assertThrows(IllegalStateException.class, () -> {
+            jobService.cancelJob(job.getId());
+        });
+    }
+
+    @Test
+    public void testCannotCancelDeadLetterJob() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-no-cancel-dl");
+        req.setPriority(1);
+        req.setMaxRetries(0); // 0 retries => fails immediately to DLQ
+        req.setPayload("payload");
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        jobService.handleFailure(claimed.get(0).getId(), "worker-1", "fail");
+
+        Job dl = jobService.getJobById(job.getId());
+        assertEquals(JobStatus.DEAD_LETTER, dl.getStatus());
+
+        assertThrows(IllegalStateException.class, () -> {
+            jobService.cancelJob(job.getId());
+        });
+    }
+
+    @Test
+    public void testCannotCancelCreatedJob() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-no-cancel-created");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("payload");
+        Job job = jobService.createJob(req);
+
+        assertEquals(JobStatus.CREATED, job.getStatus());
+
+        assertThrows(IllegalStateException.class, () -> {
+            jobService.cancelJob(job.getId());
+        });
+    }
+
+    @Test
+    public void testLateCompletionAfterCancellationRejected() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-late-completion");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("payload");
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        jobService.cancelJob(job.getId());
+
+        // Late completion should fail or affect 0 rows
+        jobService.handleSuccess(job.getId(), "worker-1");
+
+        Job dbJob = jobService.getJobById(job.getId());
+        assertEquals(JobStatus.CANCELLED, dbJob.getStatus());
+    }
+
+    @Test
+    public void testLateFailureAfterCancellationRejected() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-late-failure");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("payload");
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        jobService.cancelJob(job.getId());
+
+        // Late failure should fail or affect 0 rows
+        jobService.handleFailure(job.getId(), "worker-1", "err");
+
+        Job dbJob = jobService.getJobById(job.getId());
+        assertEquals(JobStatus.CANCELLED, dbJob.getStatus());
+        assertEquals(0, dbJob.getRetryCount());
+    }
+
+    @Test
+    public void testCancellationRaceWithRecovery() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-race-recovery");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("payload");
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        Job claimedJob = claimed.get(0);
+
+        // Expire lease manually
+        claimedJob.setLeaseUntil(LocalDateTime.now().minusSeconds(1));
+        jobRepository.saveAndFlush(claimedJob);
+
+        // Run recovery -> Transitions to QUEUED
+        jobService.recoverExpiredJobs();
+
+        Job recovered = jobService.getJobById(job.getId());
+        assertEquals(JobStatus.QUEUED, recovered.getStatus());
+
+        // Now cancel it -> Transitions to CANCELLED
+        jobService.cancelJob(job.getId());
+
+        Job finalJob = jobService.getJobById(job.getId());
+        assertEquals(JobStatus.CANCELLED, finalJob.getStatus());
+    }
+
+    @Test
+    public void testCancellationDoesNotAffectOtherWorkers() throws Exception {
+        CreateJobRequest req1 = new CreateJobRequest();
+        req1.setName("test-no-cross-cancel-1");
+        req1.setPriority(1);
+        req1.setMaxRetries(1);
+        req1.setPayload("sleep:5000");
+        req1.setType("SIMULATED");
+
+        Job job1 = jobService.createJob(req1);
+        jobService.queueJob(job1.getId());
+
+        CreateJobRequest req2 = new CreateJobRequest();
+        req2.setName("test-no-cross-cancel-2");
+        req2.setPriority(1);
+        req2.setMaxRetries(1);
+        req2.setPayload("sleep:5000");
+        req2.setType("SIMULATED");
+
+        Job job2 = jobService.createJob(req2);
+        jobService.queueJob(job2.getId());
+
+        engine.pollAndExecute();
+
+        // Wait to make sure both jobs are running
+        int limit = 100;
+        while ((jobService.getJobById(job1.getId()).getStatus() != JobStatus.RUNNING || 
+                jobService.getJobById(job2.getId()).getStatus() != JobStatus.RUNNING) && limit > 0) {
+            Thread.sleep(10);
+            limit--;
+        }
+
+        // Cancel job1 only
+        jobService.cancelJob(job1.getId());
+
+        Thread.sleep(100);
+
+        // Assert job1 is CANCELLED but job2 remains RUNNING
+        assertEquals(JobStatus.CANCELLED, jobService.getJobById(job1.getId()).getStatus());
+        assertEquals(JobStatus.RUNNING, jobService.getJobById(job2.getId()).getStatus());
+
+        // Clean up job2 to let test finish cleanly
+        jobService.cancelJob(job2.getId());
+    }
+
+    @Test
+    public void testApiControllerCancel() throws Exception {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("test-api-cancel");
+        req.setPriority(1);
+        req.setMaxRetries(1);
+        req.setPayload("payload");
+        Job job = jobService.createJob(req);
+        
+        // 1. CREATED -> 409 Conflict
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/jobs/" + job.getId() + "/cancel"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isConflict());
+
+        // 2. QUEUED -> 200 OK
+        jobService.queueJob(job.getId());
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/jobs/" + job.getId() + "/cancel"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
+
+        // 3. already CANCELLED -> 200 OK (idempotent)
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/jobs/" + job.getId() + "/cancel"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
+
+        // 4. Missing job -> 404 Not Found
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/jobs/" + java.util.UUID.randomUUID() + "/cancel"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isNotFound());
     }
 }

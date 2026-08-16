@@ -1,6 +1,8 @@
 package com.flowforge.service;
 
 import com.flowforge.entity.Job;
+import com.flowforge.enums.JobStatus;
+import java.util.UUID;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -51,6 +53,16 @@ public class JobExecutionEngine {
         this.workerIdentity = workerIdentity;
     }
 
+    private final java.util.concurrent.ConcurrentHashMap<UUID, Thread> activeThreads = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public void interruptLocalJob(UUID jobId) {
+        Thread thread = activeThreads.get(jobId);
+        if (thread != null) {
+            log.info("Interrupting local execution thread for Job ID: {}", jobId);
+            thread.interrupt();
+        }
+    }
+
     @Scheduled(fixedDelayString = "${flowforge.scheduler.poll-interval-ms:1000}")
     public void pollAndExecute() {
         log.trace("Polling for executable jobs...");
@@ -72,28 +84,47 @@ public class JobExecutionEngine {
             log.info("Job submitted - Job ID: {} submitted to worker pool", job.getId());
 
             // Start periodic heartbeat updates
-            ScheduledFuture<?> heartbeatTask = heartbeatScheduler.scheduleAtFixedRate(() -> {
+            ScheduledFuture<?>[] heartbeatTaskRef = new ScheduledFuture<?>[1];
+            heartbeatTaskRef[0] = heartbeatScheduler.scheduleAtFixedRate(() -> {
                 try {
-                    jobService.extendLease(job.getId(), workerIdentity.getWorkerId());
+                    boolean success = jobService.extendLease(job.getId(), workerIdentity.getWorkerId());
+                    if (!success) {
+                        Job dbJob = jobService.getJobById(job.getId());
+                        if (dbJob.getStatus() == JobStatus.CANCELLED) {
+                            log.info("Heartbeat detected CANCELLED status in DB for Job ID: {}. Triggering thread interruption.", job.getId());
+                            interruptLocalJob(job.getId());
+                            if (heartbeatTaskRef[0] != null) {
+                                heartbeatTaskRef[0].cancel(true);
+                            }
+                        }
+                    }
                 } catch (Exception e) {
                     log.error("Heartbeat error - Failed to extend lease for Job ID: {}", job.getId(), e);
                 }
             }, heartbeatIntervalMs, heartbeatIntervalMs, TimeUnit.MILLISECONDS);
 
             jobExecutorPool.execute(() -> {
+                activeThreads.put(job.getId(), Thread.currentThread());
                 try {
                     jobExecutor.execute(job);
                     jobService.handleSuccess(job.getId(), workerIdentity.getWorkerId());
                 } catch (Throwable t) {
-                    log.error("Worker failed - Job ID: {} failed during execution: {}", job.getId(), t.getMessage());
-                    try {
-                        jobService.handleFailure(job.getId(), workerIdentity.getWorkerId(), t.getMessage());
-                    } catch (Exception ex) {
-                        log.error("Failed to process job failure transition for Job ID: {}", job.getId(), ex);
+                    if (Thread.currentThread().isInterrupted() || t instanceof InterruptedException || t.getCause() instanceof InterruptedException) {
+                        log.info("Job execution cancelled/interrupted - Job ID: {}", job.getId());
+                    } else {
+                        log.error("Worker failed - Job ID: {} failed during execution: {}", job.getId(), t.getMessage());
+                        try {
+                            jobService.handleFailure(job.getId(), workerIdentity.getWorkerId(), t.getMessage());
+                        } catch (Exception ex) {
+                            log.error("Failed to process job failure transition for Job ID: {}", job.getId(), ex);
+                        }
                     }
                 } finally {
+                    activeThreads.remove(job.getId());
                     // Always cancel the heartbeat when execution completes
-                    heartbeatTask.cancel(true);
+                    if (heartbeatTaskRef[0] != null) {
+                        heartbeatTaskRef[0].cancel(true);
+                    }
                 }
             });
         }

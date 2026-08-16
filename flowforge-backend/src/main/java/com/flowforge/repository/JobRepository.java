@@ -67,4 +67,17 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
                        @Param("errorMessage") String errorMessage, 
                        @Param("failedAt") LocalDateTime failedAt, 
                        @Param("now") LocalDateTime now);
+    @Modifying(clearAutomatically = true)
+    @Query("UPDATE Job j SET j.status = 'CANCELLED', j.updatedAt = :now, " +
+           "j.workerId = null, j.leaseUntil = null, j.startedAt = null, j.scheduledAt = null " +
+           "WHERE j.id = :id AND (j.status = 'QUEUED' OR j.status = 'RETRYING')")
+    int cancelQueuedOrRetrying(@Param("id") UUID id, @Param("now") LocalDateTime now);
+
+    @Modifying(clearAutomatically = true)
+    @Query("UPDATE Job j SET j.status = 'CANCELLED', j.updatedAt = :now, " +
+           "j.workerId = null, j.leaseUntil = null, j.startedAt = null " +
+           "WHERE j.id = :id AND j.status = 'RUNNING' AND j.workerId = :workerId")
+    int cancelRunning(@Param("id") UUID id, 
+                      @Param("workerId") String workerId, 
+                      @Param("now") LocalDateTime now);
 }

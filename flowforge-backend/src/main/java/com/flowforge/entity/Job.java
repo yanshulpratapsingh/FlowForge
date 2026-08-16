@@ -136,10 +136,10 @@ public class Job {
         }
         return switch (current) {
             case CREATED -> next == JobStatus.QUEUED;
-            case QUEUED -> next == JobStatus.RUNNING;
-            case RETRYING -> next == JobStatus.RUNNING;
-            case RUNNING -> next == JobStatus.COMPLETED || next == JobStatus.RETRYING || next == JobStatus.DEAD_LETTER || next == JobStatus.QUEUED;
-            default -> false; // Terminal states (COMPLETED, FAILED, DEAD_LETTER) cannot transition
+            case QUEUED -> next == JobStatus.RUNNING || next == JobStatus.CANCELLED;
+            case RETRYING -> next == JobStatus.RUNNING || next == JobStatus.CANCELLED;
+            case RUNNING -> next == JobStatus.COMPLETED || next == JobStatus.RETRYING || next == JobStatus.DEAD_LETTER || next == JobStatus.QUEUED || next == JobStatus.CANCELLED;
+            default -> false; // Terminal states (COMPLETED, FAILED, DEAD_LETTER, CANCELLED) cannot transition
         };
     }
 

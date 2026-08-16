@@ -42,4 +42,24 @@ public class JobController {
     public Job queueJob(@PathVariable UUID id) {
         return jobService.queueJob(id);
     }
+
+    @PostMapping("/{id}/cancel")
+    public Job cancelJob(@PathVariable UUID id) {
+        return jobService.cancelJob(id);
+    }
+
+    @ResponseStatus(HttpStatus.CONFLICT)
+    @ExceptionHandler(IllegalStateException.class)
+    public String handleConflict(IllegalStateException ex) {
+        return ex.getMessage();
+    }
+
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    @ExceptionHandler(RuntimeException.class)
+    public String handleNotFound(RuntimeException ex) {
+        if (ex.getMessage() != null && ex.getMessage().startsWith("Job not found")) {
+            return ex.getMessage();
+        }
+        throw ex;
+    }
 }

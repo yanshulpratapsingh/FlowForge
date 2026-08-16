@@ -176,4 +176,57 @@ public class JobService {
             log.info("Job recovered successfully to QUEUED: ID={}", job.getId());
         }
     }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    @org.springframework.context.annotation.Lazy
+    private JobExecutionEngine executionEngine;
+
+    @Transactional
+    public Job cancelJob(UUID id) {
+        Job job = getJobById(id);
+
+        if (job.getStatus() == JobStatus.CANCELLED) {
+            return job;
+        }
+
+        if (job.getStatus() == JobStatus.COMPLETED || job.getStatus() == JobStatus.DEAD_LETTER || job.getStatus() == JobStatus.CREATED) {
+            throw new IllegalStateException("Cannot cancel job in status: " + job.getStatus());
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        int updated = 0;
+
+        if (job.getStatus() == JobStatus.QUEUED || job.getStatus() == JobStatus.RETRYING) {
+            updated = jobRepository.cancelQueuedOrRetrying(id, now);
+        } else if (job.getStatus() == JobStatus.RUNNING) {
+            updated = jobRepository.cancelRunning(id, job.getWorkerId(), now);
+        }
+
+        if (updated > 0) {
+            if (job.getStatus() == JobStatus.RUNNING) {
+                executionEngine.interruptLocalJob(id);
+            }
+            return getJobById(id);
+        } else {
+            job = getJobById(id);
+            if (job.getStatus() == JobStatus.CANCELLED) {
+                return job;
+            }
+            if (job.getStatus() == JobStatus.COMPLETED || job.getStatus() == JobStatus.DEAD_LETTER || job.getStatus() == JobStatus.CREATED) {
+                throw new IllegalStateException("Cannot cancel job in status: " + job.getStatus());
+            }
+            if (job.getStatus() == JobStatus.QUEUED || job.getStatus() == JobStatus.RETRYING) {
+                updated = jobRepository.cancelQueuedOrRetrying(id, now);
+            } else if (job.getStatus() == JobStatus.RUNNING) {
+                updated = jobRepository.cancelRunning(id, job.getWorkerId(), now);
+            }
+            if (updated > 0) {
+                if (job.getStatus() == JobStatus.RUNNING) {
+                    executionEngine.interruptLocalJob(id);
+                }
+                return getJobById(id);
+            }
+            throw new IllegalStateException("Concurrent modification during job cancellation");
+        }
+    }
 }
