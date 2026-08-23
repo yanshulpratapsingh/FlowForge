@@ -123,4 +123,29 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
             @Param("now") LocalDateTime now, 
             @Param("limit") int limit,
             @Param("starvationThresholdSeconds") long starvationThresholdSeconds);
+
+    @Query("SELECT j.status, COUNT(j) FROM Job j GROUP BY j.status")
+    List<Object[]> countJobsByStatus();
+
+    @Query("SELECT COUNT(DISTINCT j.workerId) FROM Job j WHERE j.status = 'RUNNING' AND j.workerId IS NOT NULL")
+    long countActiveWorkers();
+
+    @Query(value = "SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (updated_at - started_at)) * 1000), 0), " +
+                   "       COALESCE(MAX(EXTRACT(EPOCH FROM (updated_at - started_at)) * 1000), 0) " +
+                   "FROM jobs WHERE status = 'COMPLETED'", 
+           nativeQuery = true)
+    List<Object[]> getCompletedJobDurationMetrics();
+
+    @Query(value = "SELECT COUNT(*) FROM jobs " +
+                   "WHERE started_at >= :since " +
+                   "   OR (status IN ('RETRYING', 'DEAD_LETTER') AND last_failed_at >= :since) " +
+                   "   OR (status = 'CANCELLED' AND updated_at >= :since)", 
+           nativeQuery = true)
+    long countRecentExecutions(@Param("since") LocalDateTime since);
+
+    @Query(value = "SELECT COUNT(*) FROM jobs WHERE status IN ('RETRYING', 'DEAD_LETTER') AND last_failed_at >= :since", nativeQuery = true)
+    long countRecentFailures(@Param("since") LocalDateTime since);
+
+    @Query(value = "SELECT COUNT(*) FROM jobs WHERE status = 'CANCELLED' AND updated_at >= :since", nativeQuery = true)
+    long countRecentCancellations(@Param("since") LocalDateTime since);
 }
