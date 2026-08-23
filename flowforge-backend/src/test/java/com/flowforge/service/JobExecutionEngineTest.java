@@ -2,6 +2,10 @@ package com.flowforge.service;
 
 import com.flowforge.dto.CreateJobRequest;
 import com.flowforge.dto.JobMetricsResponse;
+import com.flowforge.dto.WorkloadAnalyticsResponse;
+import com.flowforge.dto.JobTypeAnalyticsResponse;
+import com.flowforge.dto.WorkerAnalyticsResponse;
+import com.flowforge.dto.QueueAnalyticsResponse;
 import com.flowforge.entity.Job;
 import com.flowforge.enums.JobStatus;
 import com.flowforge.repository.JobRepository;
@@ -43,7 +47,13 @@ public class JobExecutionEngineTest {
     private com.flowforge.controller.JobMetricsController jobMetricsController;
 
     @Autowired
+    private com.flowforge.controller.JobAnalyticsController jobAnalyticsController;
+
+    @Autowired
     private com.flowforge.service.JobMetricsService jobMetricsService;
+
+    @Autowired
+    private com.flowforge.service.JobAnalyticsService jobAnalyticsService;
 
     @Autowired
     private com.flowforge.config.FlowForgeLimitsConfig limitsConfig;
@@ -53,7 +63,7 @@ public class JobExecutionEngineTest {
     @org.junit.jupiter.api.BeforeEach
     public void setup() {
         this.mockMvc = org.springframework.test.web.servlet.setup.MockMvcBuilders
-                .standaloneSetup(jobController, jobMetricsController)
+                .standaloneSetup(jobController, jobMetricsController, jobAnalyticsController)
                 .build();
         limitsConfig.getTypes().clear();
     }
@@ -1638,5 +1648,211 @@ public class JobExecutionEngineTest {
         assertNotNull(limitsConfig);
         assertNotNull(jobService);
         assertNotNull(engine);
+    }
+
+    @Test
+    public void testEmptyDatabaseAnalytics() {
+        jobRepository.deleteAll();
+
+        WorkloadAnalyticsResponse workload = jobAnalyticsService.getWorkloadAnalytics();
+        assertEquals(0, workload.getTotalJobs());
+        assertEquals(0.0, workload.getSuccessRate());
+        assertEquals(0.0, workload.getFailureRate());
+        assertEquals(0.0, workload.getRetryRate());
+
+        List<JobTypeAnalyticsResponse> types = jobAnalyticsService.getTypeAnalytics();
+        assertTrue(types.isEmpty());
+
+        WorkerAnalyticsResponse workers = jobAnalyticsService.getWorkerAnalytics();
+        assertEquals(0, workers.getActiveWorkerCount());
+        assertTrue(workers.getActiveWorkers().isEmpty());
+
+        QueueAnalyticsResponse queue = jobAnalyticsService.getQueueAnalytics();
+        assertEquals(0, queue.getQueueDepth());
+        assertEquals(0, queue.getRunningCount());
+        assertEquals(0, queue.getRetryingCount());
+        assertEquals(0, queue.getOldestQueuedJobAgeSeconds());
+        assertEquals(0, queue.getOldestRetryingJobAgeSeconds());
+    }
+
+    @Test
+    public void testWorkloadRatesAndCounts() {
+        jobRepository.deleteAll();
+
+        // 2 Completed
+        jobRepository.saveAndFlush(createRawJob(JobStatus.COMPLETED));
+        jobRepository.saveAndFlush(createRawJob(JobStatus.COMPLETED));
+        // 1 Retrying
+        jobRepository.saveAndFlush(createRawJob(JobStatus.RETRYING));
+        // 1 Dead Letter
+        jobRepository.saveAndFlush(createRawJob(JobStatus.DEAD_LETTER));
+
+        WorkloadAnalyticsResponse workload = jobAnalyticsService.getWorkloadAnalytics();
+        assertEquals(4, workload.getTotalJobs());
+        assertEquals(50.0, workload.getSuccessRate());
+        assertEquals(25.0, workload.getFailureRate());
+        assertEquals(25.0, workload.getRetryRate());
+    }
+
+    @Test
+    public void testPerTypeStatisticsAndDurations() {
+        jobRepository.deleteAll();
+
+        LocalDateTime now = LocalDateTime.now();
+
+        // Type A: 1 Completed (started 10s ago)
+        Job ja1 = createRawJob(JobStatus.COMPLETED);
+        ja1.setType("TYPE_A");
+        ja1.setStartedAt(now.minusSeconds(10));
+        ja1.setUpdatedAt(now);
+        jobRepository.saveAndFlush(ja1);
+
+        // Type A: 1 Completed (started 30s ago)
+        Job ja2 = createRawJob(JobStatus.COMPLETED);
+        ja2.setType("TYPE_A");
+        ja2.setStartedAt(now.minusSeconds(30));
+        ja2.setUpdatedAt(now);
+        jobRepository.saveAndFlush(ja2);
+
+        // Type B: 1 Retrying
+        Job jb = createRawJob(JobStatus.RETRYING);
+        jb.setType("TYPE_B");
+        jobRepository.saveAndFlush(jb);
+
+        List<JobTypeAnalyticsResponse> list = jobAnalyticsService.getTypeAnalytics();
+        assertEquals(2, list.size());
+
+        JobTypeAnalyticsResponse typeA = list.stream().filter(r -> "TYPE_A".equals(r.getType())).findFirst().orElseThrow();
+        assertEquals(2, typeA.getTotalJobs());
+        assertEquals(2, typeA.getCompletedCount());
+        assertEquals(20000L, typeA.getAverageDurationMs());
+        assertEquals(30000L, typeA.getMaxDurationMs());
+
+        JobTypeAnalyticsResponse typeB = list.stream().filter(r -> "TYPE_B".equals(r.getType())).findFirst().orElseThrow();
+        assertEquals(1, typeB.getTotalJobs());
+        assertEquals(1, typeB.getRetryingCount());
+    }
+
+    @Test
+    public void testOldestQueuedAndRetryingJobAges() {
+        jobRepository.deleteAll();
+
+        LocalDateTime now = LocalDateTime.now();
+
+        // Oldest Queued: created 120s ago
+        Job q1 = createRawJob(JobStatus.QUEUED);
+        q1.setCreatedAt(now.minusSeconds(120));
+        jobRepository.saveAndFlush(q1);
+
+        // Newer Queued: created 40s ago
+        Job q2 = createRawJob(JobStatus.QUEUED);
+        q2.setCreatedAt(now.minusSeconds(40));
+        jobRepository.saveAndFlush(q2);
+
+        // Oldest Retrying: created 180s ago
+        Job r1 = createRawJob(JobStatus.RETRYING);
+        r1.setCreatedAt(now.minusSeconds(180));
+        jobRepository.saveAndFlush(r1);
+
+        QueueAnalyticsResponse queue = jobAnalyticsService.getQueueAnalytics();
+        assertEquals(2, queue.getQueueDepth());
+        assertEquals(1, queue.getRetryingCount());
+        // Verify oldest queued wait age is around 120 seconds
+        assertTrue(queue.getOldestQueuedJobAgeSeconds() >= 120 && queue.getOldestQueuedJobAgeSeconds() < 130);
+        // Verify oldest retrying wait age is around 180 seconds
+        assertTrue(queue.getOldestRetryingJobAgeSeconds() >= 180 && queue.getOldestRetryingJobAgeSeconds() < 190);
+    }
+
+    @Test
+    public void testWorkerStatisticsMapping() {
+        jobRepository.deleteAll();
+
+        // Worker 1 owns 2 running jobs
+        Job j1 = createRawJob(JobStatus.RUNNING);
+        j1.setWorkerId("worker-1");
+        jobRepository.saveAndFlush(j1);
+
+        Job j2 = createRawJob(JobStatus.RUNNING);
+        j2.setWorkerId("worker-1");
+        jobRepository.saveAndFlush(j2);
+
+        // Worker 2 owns 1 running job
+        Job j3 = createRawJob(JobStatus.RUNNING);
+        j3.setWorkerId("worker-2");
+        jobRepository.saveAndFlush(j3);
+
+        WorkerAnalyticsResponse response = jobAnalyticsService.getWorkerAnalytics();
+        assertEquals(2, response.getActiveWorkerCount());
+
+        WorkerAnalyticsResponse.WorkerStats stats1 = response.getActiveWorkers().stream()
+                .filter(w -> "worker-1".equals(w.getWorkerId()))
+                .findFirst().orElseThrow();
+        assertEquals(2, stats1.getRunningJobsCount());
+        assertEquals(2, stats1.getRunningJobIds().size());
+        assertTrue(stats1.getRunningJobIds().contains(j1.getId()));
+        assertTrue(stats1.getRunningJobIds().contains(j2.getId()));
+
+        WorkerAnalyticsResponse.WorkerStats stats2 = response.getActiveWorkers().stream()
+                .filter(w -> "worker-2".equals(w.getWorkerId()))
+                .findFirst().orElseThrow();
+        assertEquals(1, stats2.getRunningJobsCount());
+        assertEquals(1, stats2.getRunningJobIds().size());
+        assertTrue(stats2.getRunningJobIds().contains(j3.getId()));
+    }
+
+    @Test
+    public void testRecentThroughputWindowAndFailuresByType() {
+        jobRepository.deleteAll();
+
+        LocalDateTime now = LocalDateTime.now();
+
+        // Type A: 1 Completed started 10m ago (within 60m window) -> count = 1
+        Job j1 = createRawJob(JobStatus.COMPLETED);
+        j1.setType("TYPE_A");
+        j1.setStartedAt(now.minusMinutes(10));
+        j1.setUpdatedAt(now);
+        jobRepository.saveAndFlush(j1);
+
+        // Type A: 1 Completed started 90m ago (outside 60m window) -> does not count
+        Job j2 = createRawJob(JobStatus.COMPLETED);
+        j2.setType("TYPE_A");
+        j2.setStartedAt(now.minusMinutes(90));
+        j2.setUpdatedAt(now);
+        jobRepository.saveAndFlush(j2);
+
+        // Type A: 1 Failed/Retrying, lastFailedAt 20m ago (within window) -> failure = 1, execution = 1
+        Job j3 = createRawJob(JobStatus.RETRYING);
+        j3.setType("TYPE_A");
+        j3.setLastFailedAt(now.minusMinutes(20));
+        jobRepository.saveAndFlush(j3);
+
+        List<JobTypeAnalyticsResponse> list = jobAnalyticsService.getTypeAnalytics();
+        JobTypeAnalyticsResponse typeA = list.stream().filter(r -> "TYPE_A".equals(r.getType())).findFirst().orElseThrow();
+        assertEquals(2, typeA.getRecentExecutions());
+        assertEquals(1, typeA.getRecentFailures());
+    }
+
+    @Test
+    public void testAnalyticsHttpEndpoints() throws Exception {
+        jobRepository.deleteAll();
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/analytics/workload"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.totalJobs").value(0))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.successRate").value(0.0));
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/analytics/workload/types"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$").isArray());
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/analytics/workers"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.activeWorkerCount").value(0))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.activeWorkers").isArray());
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/analytics/queue"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.queueDepth").value(0))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.oldestQueuedJobAgeSeconds").value(0));
     }
 }

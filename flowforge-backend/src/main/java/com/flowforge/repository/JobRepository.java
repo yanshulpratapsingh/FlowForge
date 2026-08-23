@@ -148,4 +148,46 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
 
     @Query(value = "SELECT COUNT(*) FROM jobs WHERE status = 'CANCELLED' AND updated_at >= :since", nativeQuery = true)
     long countRecentCancellations(@Param("since") LocalDateTime since);
+
+    List<Job> findByStatus(com.flowforge.enums.JobStatus status);
+
+    @Query(value = "SELECT COALESCE(EXTRACT(EPOCH FROM (:now - MIN(COALESCE(scheduled_at, created_at)))), 0) " +
+                   "FROM jobs WHERE status = 'QUEUED' AND (scheduled_at IS NULL OR scheduled_at <= :now)", 
+           nativeQuery = true)
+    double getOldestQueuedJobAgeSeconds(@Param("now") LocalDateTime now);
+
+    @Query(value = "SELECT COALESCE(EXTRACT(EPOCH FROM (:now - MIN(COALESCE(scheduled_at, created_at)))), 0) " +
+                   "FROM jobs WHERE status = 'RETRYING' AND (scheduled_at IS NULL OR scheduled_at <= :now)", 
+           nativeQuery = true)
+    double getOldestRetryingJobAgeSeconds(@Param("now") LocalDateTime now);
+
+    @Query("SELECT j.type, j.status, COUNT(j) FROM Job j GROUP BY j.type, j.status")
+    List<Object[]> getTypeStatusCounts();
+
+    @Query(value = "SELECT type, " +
+                   "       COALESCE(AVG(EXTRACT(EPOCH FROM (updated_at - started_at)) * 1000), 0), " +
+                   "       COALESCE(MAX(EXTRACT(EPOCH FROM (updated_at - started_at)) * 1000), 0) " +
+                   "FROM jobs WHERE status = 'COMPLETED' GROUP BY type", 
+           nativeQuery = true)
+    List<Object[]> getTypeDurationMetrics();
+
+    @Query(value = "SELECT type, COUNT(*) FROM jobs " +
+                   "WHERE started_at >= :since " +
+                   "   OR (status IN ('RETRYING', 'DEAD_LETTER') AND last_failed_at >= :since) " +
+                   "   OR (status = 'CANCELLED' AND updated_at >= :since) " +
+                   "GROUP BY type", 
+           nativeQuery = true)
+    List<Object[]> getTypeRecentExecutions(@Param("since") LocalDateTime since);
+
+    @Query(value = "SELECT type, COUNT(*) FROM jobs " +
+                   "WHERE status IN ('RETRYING', 'DEAD_LETTER') AND last_failed_at >= :since " +
+                   "GROUP BY type", 
+           nativeQuery = true)
+    List<Object[]> getTypeRecentFailures(@Param("since") LocalDateTime since);
+
+    @Query(value = "SELECT type, COUNT(*) FROM jobs " +
+                   "WHERE status = 'CANCELLED' AND updated_at >= :since " +
+                   "GROUP BY type", 
+           nativeQuery = true)
+    List<Object[]> getTypeRecentCancellations(@Param("since") LocalDateTime since);
 }
