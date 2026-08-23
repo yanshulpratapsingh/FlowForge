@@ -38,11 +38,15 @@ public class JobExecutionEngineTest {
     @Autowired
     private com.flowforge.controller.JobController jobController;
 
+    @Autowired
+    private com.flowforge.config.FlowForgeLimitsConfig limitsConfig;
+
     private org.springframework.test.web.servlet.MockMvc mockMvc;
 
     @org.junit.jupiter.api.BeforeEach
     public void setup() {
         this.mockMvc = org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(jobController).build();
+        limitsConfig.getTypes().clear();
     }
 
     @AfterEach
@@ -1143,5 +1147,208 @@ public class JobExecutionEngineTest {
         Job state2 = jobService.getJobById(job.getId());
         assertEquals(JobStatus.DEAD_LETTER, state2.getStatus());
         assertEquals(2, state2.getRetryCount());
+    }
+
+    @Test
+    public void testConcurrencyLimitEnforced() {
+        // Configure max concurrency limit of 2 for LIMITED_CONCURRENCY type
+        com.flowforge.config.FlowForgeLimitsConfig.TypeLimit limit = new com.flowforge.config.FlowForgeLimitsConfig.TypeLimit();
+        limit.setMaxConcurrency(2);
+        limitsConfig.getTypes().put("LIMITED_CONCURRENCY", limit);
+
+        // Create 5 jobs of LIMITED_CONCURRENCY type
+        for (int i = 0; i < 5; i++) {
+            CreateJobRequest req = new CreateJobRequest();
+            req.setName("job-concurrency-" + i);
+            req.setPriority(1);
+            req.setMaxRetries(1);
+            req.setType("LIMITED_CONCURRENCY");
+            Job job = jobService.createJob(req);
+            job = jobService.queueJob(job.getId());
+        }
+
+        // Claim with a limit of 5
+        List<Job> claimed = jobService.claimExecutableJobs(5, "worker-1");
+        assertEquals(2, claimed.size());
+
+        // Verify remaining 3 jobs are still QUEUED
+        long queuedCount = jobRepository.findAll().stream()
+                .filter(j -> j.getStatus() == JobStatus.QUEUED && "LIMITED_CONCURRENCY".equals(j.getType()))
+                .count();
+        assertEquals(3, queuedCount);
+    }
+
+    @Test
+    public void testRateLimitEnforced() {
+        // Configure max rate limit of 3 per minute for LIMITED_RATE type
+        com.flowforge.config.FlowForgeLimitsConfig.TypeLimit limit = new com.flowforge.config.FlowForgeLimitsConfig.TypeLimit();
+        limit.setMaxRatePerMinute(3);
+        limitsConfig.getTypes().put("LIMITED_RATE", limit);
+
+        // Create 5 jobs of LIMITED_RATE type
+        for (int i = 0; i < 5; i++) {
+            CreateJobRequest req = new CreateJobRequest();
+            req.setName("job-rate-" + i);
+            req.setPriority(1);
+            req.setMaxRetries(1);
+            req.setType("LIMITED_RATE");
+            Job job = jobService.createJob(req);
+            job = jobService.queueJob(job.getId());
+        }
+
+        // Claim with a limit of 5
+        List<Job> claimed = jobService.claimExecutableJobs(5, "worker-1");
+        assertEquals(3, claimed.size());
+
+        // Verify remaining 2 jobs are still QUEUED
+        long queuedCount = jobRepository.findAll().stream()
+                .filter(j -> j.getStatus() == JobStatus.QUEUED && "LIMITED_RATE".equals(j.getType()))
+                .count();
+        assertEquals(2, queuedCount);
+    }
+
+    @Test
+    public void testConcurrentWorkersRespectAdvisoryLocks() {
+        // Configure concurrency limit of 1
+        com.flowforge.config.FlowForgeLimitsConfig.TypeLimit limit = new com.flowforge.config.FlowForgeLimitsConfig.TypeLimit();
+        limit.setMaxConcurrency(1);
+        limitsConfig.getTypes().put("LIMITED_LOCK", limit);
+
+        // Create 2 jobs of LIMITED_LOCK type
+        for (int i = 0; i < 2; i++) {
+            CreateJobRequest req = new CreateJobRequest();
+            req.setName("job-lock-" + i);
+            req.setPriority(1);
+            req.setMaxRetries(1);
+            req.setType("LIMITED_LOCK");
+            Job job = jobService.createJob(req);
+            job = jobService.queueJob(job.getId());
+        }
+
+        // Worker 1 claims 1 job (limit = 1)
+        List<Job> claimed1 = jobService.claimExecutableJobs(1, "worker-1");
+        assertEquals(1, claimed1.size());
+
+        // Worker 2 tries to claim 1 job, should get 0 because limit is reached
+        List<Job> claimed2 = jobService.claimExecutableJobs(1, "worker-2");
+        assertEquals(0, claimed2.size());
+    }
+
+    @Test
+    public void testUnlimitedTypesClaimNormally() {
+        // No limits configured for UNLIMITED type
+
+        // Create 5 jobs of UNLIMITED type
+        for (int i = 0; i < 5; i++) {
+            CreateJobRequest req = new CreateJobRequest();
+            req.setName("job-unlimited-" + i);
+            req.setPriority(1);
+            req.setMaxRetries(1);
+            req.setType("UNLIMITED");
+            Job job = jobService.createJob(req);
+            job = jobService.queueJob(job.getId());
+        }
+
+        // Claim with a limit of 5
+        List<Job> claimed = jobService.claimExecutableJobs(5, "worker-1");
+        assertEquals(5, claimed.size());
+    }
+
+    @Test
+    public void testCancelledAndCompletedJobsDoNotBlockConcurrency() {
+        // Configure concurrency limit of 1
+        com.flowforge.config.FlowForgeLimitsConfig.TypeLimit limit = new com.flowforge.config.FlowForgeLimitsConfig.TypeLimit();
+        limit.setMaxConcurrency(1);
+        limitsConfig.getTypes().put("LIMITED_RELEASE", limit);
+
+        // Job A: completed
+        CreateJobRequest reqA = new CreateJobRequest();
+        reqA.setName("jobA");
+        reqA.setPriority(1);
+        reqA.setMaxRetries(1);
+        reqA.setType("LIMITED_RELEASE");
+        Job jobA = jobService.createJob(reqA);
+        jobA = jobService.queueJob(jobA.getId());
+
+        List<Job> claimedA = jobService.claimExecutableJobs(1, "worker-1");
+        assertEquals(1, claimedA.size());
+        jobService.handleSuccess(claimedA.get(0).getId(), "worker-1");
+
+        // Job B: should be claimable now
+        CreateJobRequest reqB = new CreateJobRequest();
+        reqB.setName("jobB");
+        reqB.setPriority(1);
+        reqB.setMaxRetries(1);
+        reqB.setType("LIMITED_RELEASE");
+        Job jobB = jobService.createJob(reqB);
+        jobB = jobService.queueJob(jobB.getId());
+
+        List<Job> claimedB = jobService.claimExecutableJobs(1, "worker-2");
+        assertEquals(1, claimedB.size());
+        assertEquals(jobB.getId(), claimedB.get(0).getId());
+        jobService.handleSuccess(claimedB.get(0).getId(), "worker-2");
+
+        // Job C: cancelled
+        CreateJobRequest reqC = new CreateJobRequest();
+        reqC.setName("jobC");
+        reqC.setPriority(1);
+        reqC.setMaxRetries(1);
+        reqC.setType("LIMITED_RELEASE");
+        Job jobC = jobService.createJob(reqC);
+        jobC = jobService.queueJob(jobC.getId());
+
+        List<Job> claimedC = jobService.claimExecutableJobs(1, "worker-3");
+        assertEquals(1, claimedC.size());
+        jobService.cancelJob(claimedC.get(0).getId());
+
+        // Job D: should be claimable now
+        CreateJobRequest reqD = new CreateJobRequest();
+        reqD.setName("jobD");
+        reqD.setPriority(1);
+        reqD.setMaxRetries(1);
+        reqD.setType("LIMITED_RELEASE");
+        Job jobD = jobService.createJob(reqD);
+        jobD = jobService.queueJob(jobD.getId());
+
+        List<Job> claimedD = jobService.claimExecutableJobs(1, "worker-4");
+        assertEquals(1, claimedD.size());
+        assertEquals(jobD.getId(), claimedD.get(0).getId());
+    }
+
+    @Test
+    public void testExistingCancellationAndRetryBehaviorStillWorks() {
+        // Configure rate limit of 1 per minute
+        com.flowforge.config.FlowForgeLimitsConfig.TypeLimit limit = new com.flowforge.config.FlowForgeLimitsConfig.TypeLimit();
+        limit.setMaxRatePerMinute(1);
+        limitsConfig.getTypes().put("LIMITED_RETRY_RATE", limit);
+
+        // Job A: fails and goes to RETRYING
+        CreateJobRequest reqA = new CreateJobRequest();
+        reqA.setName("jobA");
+        reqA.setPriority(1);
+        reqA.setMaxRetries(2);
+        reqA.setType("LIMITED_RETRY_RATE");
+        Job jobA = jobService.createJob(reqA);
+        jobA = jobService.queueJob(jobA.getId());
+
+        List<Job> claimedA = jobService.claimExecutableJobs(1, "worker-1");
+        assertEquals(1, claimedA.size());
+        jobService.handleFailure(claimedA.get(0).getId(), "worker-1", "failure error");
+
+        // Verify status is RETRYING
+        Job stateA = jobService.getJobById(jobA.getId());
+        assertEquals(JobStatus.RETRYING, stateA.getStatus());
+
+        // Job B: created and queued, but should NOT be claimed because the failed attempt consumes the rate limit
+        CreateJobRequest reqB = new CreateJobRequest();
+        reqB.setName("jobB");
+        reqB.setPriority(1);
+        reqB.setMaxRetries(1);
+        reqB.setType("LIMITED_RETRY_RATE");
+        Job jobB = jobService.createJob(reqB);
+        jobB = jobService.queueJob(jobB.getId());
+
+        List<Job> claimedB = jobService.claimExecutableJobs(1, "worker-2");
+        assertEquals(0, claimedB.size());
     }
 }

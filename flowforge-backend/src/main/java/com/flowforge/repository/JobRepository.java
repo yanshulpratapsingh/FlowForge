@@ -88,4 +88,39 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
     int cancelRunning(@Param("id") UUID id, 
                       @Param("workerId") String workerId, 
                       @Param("now") LocalDateTime now);
+
+    @Query(value = "SELECT DISTINCT type FROM jobs WHERE status = 'QUEUED' OR status = 'RETRYING'", nativeQuery = true)
+    List<String> findActiveJobTypes();
+
+    @Query(value = "SELECT COUNT(*) FROM jobs WHERE type = :type AND status = 'RUNNING'", nativeQuery = true)
+    int countRunningJobsByType(@Param("type") String type);
+
+    @Query(value = "SELECT COUNT(*) FROM jobs " +
+                   "WHERE type = :type " +
+                   "  AND ( " +
+                   "       (status = 'RUNNING' AND started_at >= :since) " +
+                   "       OR (status = 'COMPLETED' AND started_at >= :since) " +
+                   "       OR (status IN ('RETRYING', 'DEAD_LETTER') AND last_failed_at >= :since) " +
+                   "       OR (status = 'CANCELLED' AND updated_at >= :since) " +
+                   "      )", 
+           nativeQuery = true)
+    int countRecentExecutionsByType(@Param("type") String type, @Param("since") LocalDateTime since);
+
+    @Query(value = "SELECT * FROM jobs " +
+                   "WHERE type = :type " +
+                   "  AND (status = 'QUEUED' OR status = 'RETRYING') " +
+                   "  AND (scheduled_at IS NULL OR scheduled_at <= :now) " +
+                   "ORDER BY " +
+                   "  CASE WHEN EXTRACT(EPOCH FROM (:now - COALESCE(scheduled_at, created_at))) > :starvationThresholdSeconds THEN 1 ELSE 0 END DESC, " +
+                   "  priority DESC, " +
+                   "  COALESCE(scheduled_at, created_at) ASC, " +
+                   "  id ASC " +
+                   "LIMIT :limit " +
+                   "FOR UPDATE SKIP LOCKED", 
+           nativeQuery = true)
+    List<Job> findExecutableJobsByTypeWithLock(
+            @Param("type") String type,
+            @Param("now") LocalDateTime now, 
+            @Param("limit") int limit,
+            @Param("starvationThresholdSeconds") long starvationThresholdSeconds);
 }

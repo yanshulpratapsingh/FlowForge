@@ -4,6 +4,9 @@ import com.flowforge.dto.CreateJobRequest;
 import com.flowforge.entity.Job;
 import com.flowforge.enums.JobStatus;
 import com.flowforge.repository.JobRepository;
+import com.flowforge.config.FlowForgeLimitsConfig;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,6 +27,12 @@ public class JobService {
     private static final Logger log = LoggerFactory.getLogger(JobService.class);
 
     private final JobRepository jobRepository;
+
+    @Autowired
+    private FlowForgeLimitsConfig limitsConfig;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
 
     @Value("${flowforge.retry.base-delay-ms:2000}")
     private long baseDelayMs;
@@ -89,19 +98,54 @@ public class JobService {
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public List<Job> claimExecutableJobs(int limit, String workerId) {
         LocalDateTime now = LocalDateTime.now();
-        List<Job> eligibleJobs = jobRepository.findExecutableJobsWithLock(now, limit, starvationThresholdSeconds);
         List<Job> claimedJobs = new ArrayList<>();
 
-        for (Job job : eligibleJobs) {
-            job.transitionTo(JobStatus.RUNNING);
-            job.setWorkerId(workerId);
-            job.setStartedAt(now);
-            job.setLeaseUntil(now.plus(Duration.ofMillis(leaseDurationMs)));
+        // 1. Get distinct types of queued or retrying jobs
+        List<String> activeTypes = jobRepository.findActiveJobTypes();
 
-            Job savedJob = jobRepository.save(job);
-            claimedJobs.add(savedJob);
-            log.info("Job claimed - Job ID: {}, Name: {}, Worker: {}, Lease until: {}", 
-                    job.getId(), job.getName(), workerId, job.getLeaseUntil());
+        for (String type : activeTypes) {
+            if (claimedJobs.size() >= limit) {
+                break;
+            }
+
+            int remainingLimit = limit - claimedJobs.size();
+            FlowForgeLimitsConfig.TypeLimit limits = limitsConfig.getTypes().get(type.toUpperCase());
+
+            int slots = remainingLimit;
+            if (limits != null) {
+                // Acquire transaction-scoped advisory lock for this type
+                long lockId = (long) type.toUpperCase().hashCode();
+                jdbcTemplate.execute("SELECT pg_advisory_xact_lock(" + lockId + ")");
+
+                // Count currently running jobs of this type
+                int runningCount = jobRepository.countRunningJobsByType(type.toUpperCase());
+                if (limits.getMaxConcurrency() != null) {
+                    int availableConcurrency = limits.getMaxConcurrency() - runningCount;
+                    slots = Math.min(slots, availableConcurrency);
+                }
+
+                // Count executions in the last minute
+                if (limits.getMaxRatePerMinute() != null) {
+                    LocalDateTime oneMinuteAgo = now.minusMinutes(1);
+                    int recentCount = jobRepository.countRecentExecutionsByType(type.toUpperCase(), oneMinuteAgo);
+                    int availableRate = limits.getMaxRatePerMinute() - recentCount;
+                    slots = Math.min(slots, availableRate);
+                }
+            }
+
+            if (slots > 0) {
+                List<Job> eligible = jobRepository.findExecutableJobsByTypeWithLock(
+                        type.toUpperCase(), now, slots, starvationThresholdSeconds);
+                for (Job job : eligible) {
+                    job.transitionTo(JobStatus.RUNNING);
+                    job.setWorkerId(workerId);
+                    job.setStartedAt(now);
+                    job.setLeaseUntil(now.plus(Duration.ofMillis(leaseDurationMs)));
+                    claimedJobs.add(jobRepository.save(job));
+                    log.info("Job claimed - Job ID: {}, Name: {}, Worker: {}, Lease until: {}", 
+                            job.getId(), job.getName(), workerId, job.getLeaseUntil());
+                }
+            }
         }
 
         return claimedJobs;
