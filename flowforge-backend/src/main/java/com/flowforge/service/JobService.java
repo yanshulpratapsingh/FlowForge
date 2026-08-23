@@ -82,7 +82,7 @@ public class JobService {
 
     public Job getJobById(UUID id) {
         return jobRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Job not found: " + id));
+                .orElseThrow(() -> new com.flowforge.exception.ResourceNotFoundException("Job not found: " + id));
     }
 
     @Transactional

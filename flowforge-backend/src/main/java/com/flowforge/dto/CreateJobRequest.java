@@ -7,18 +7,21 @@ import jakarta.validation.constraints.NotNull;
 public class CreateJobRequest {
 
     @NotBlank
+    @jakarta.validation.constraints.Size(max = 255, message = "Job name cannot exceed 255 characters")
     private String name;
 
+    @jakarta.validation.constraints.Size(max = 10000, message = "Payload cannot exceed 10000 characters")
     private String payload;
 
     @NotNull
-    @Min(0)
+    @Min(value = 0, message = "Priority must be 0 or positive")
     private Integer priority;
 
     @NotNull
-    @Min(0)
+    @Min(value = 0, message = "Max retries must be 0 or positive")
     private Integer maxRetries;
 
+    @jakarta.validation.constraints.Size(max = 100, message = "Job type cannot exceed 100 characters")
     private String type;
 
     private java.time.LocalDateTime scheduledAt;

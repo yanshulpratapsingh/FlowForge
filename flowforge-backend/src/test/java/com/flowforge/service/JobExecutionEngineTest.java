@@ -21,7 +21,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest(properties = {
     "flowforge.scheduler.poll-interval-ms=3600000",
-    "flowforge.worker.recovery-interval-ms=3600000"
+    "flowforge.worker.recovery-interval-ms=3600000",
+    "flowforge.security.api-key=test-api-key"
 })
 public class JobExecutionEngineTest {
 
@@ -58,12 +59,22 @@ public class JobExecutionEngineTest {
     @Autowired
     private com.flowforge.config.FlowForgeLimitsConfig limitsConfig;
 
+    @Autowired
+    private com.flowforge.security.ApiKeyInterceptor apiKeyInterceptor;
+
+    @Autowired
+    private com.flowforge.exception.GlobalExceptionHandler globalExceptionHandler;
+
     private org.springframework.test.web.servlet.MockMvc mockMvc;
 
     @org.junit.jupiter.api.BeforeEach
     public void setup() {
         this.mockMvc = org.springframework.test.web.servlet.setup.MockMvcBuilders
                 .standaloneSetup(jobController, jobMetricsController, jobAnalyticsController)
+                .setControllerAdvice(globalExceptionHandler)
+                .addInterceptors(apiKeyInterceptor)
+                .defaultRequest(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/")
+                        .header("X-API-KEY", "test-api-key"))
                 .build();
         limitsConfig.getTypes().clear();
     }
@@ -1854,5 +1865,104 @@ public class JobExecutionEngineTest {
                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.queueDepth").value(0))
                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.oldestQueuedJobAgeSeconds").value(0));
+    }
+
+    @Test
+    public void testCreateJobInvalidRequestReturns400AndValidationErrorJson() throws Exception {
+        String invalidJson = "{\"name\":\"\",\"priority\":-1,\"maxRetries\":-5}";
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/jobs")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content(invalidJson))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isBadRequest())
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.error").value("Bad Request"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message").value("Validation failed"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.validationErrors.name").exists())
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.validationErrors.priority").value("Priority must be 0 or positive"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.validationErrors.maxRetries").value("Max retries must be 0 or positive"));
+    }
+
+    @Test
+    public void testApiKeyAuthenticationMissingAndInvalid() throws Exception {
+        // Create MockMvc instance WITHOUT default request header
+        org.springframework.test.web.servlet.MockMvc localMockMvc = org.springframework.test.web.servlet.setup.MockMvcBuilders
+                .standaloneSetup(jobController)
+                .addInterceptors(apiKeyInterceptor)
+                .build();
+
+        // 1. Missing API Key header -> Expect 401
+        localMockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/jobs"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isUnauthorized())
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.error").value("Unauthorized"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message").value("Missing or invalid API key"));
+
+        // 2. Invalid API Key header -> Expect 401
+        localMockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/jobs")
+                .header("X-API-KEY", "wrong-key-123"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isUnauthorized());
+
+        // 3. Valid API Key header -> Expect 200
+        localMockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/jobs")
+                .header("X-API-KEY", "test-api-key"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
+    }
+
+    @Test
+    public void testMissingJobReturns404NotFoundJson() throws Exception {
+        java.util.UUID nonExistentId = java.util.UUID.randomUUID();
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/jobs/" + nonExistentId))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isNotFound())
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.error").value("Not Found"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message").value("Job not found: " + nonExistentId));
+    }
+
+    @Test
+    public void testInvalidStatusTransitionReturns409ConflictJson() throws Exception {
+        jobRepository.deleteAll();
+        // Create job directly in COMPLETED state
+        Job job = createRawJob(JobStatus.COMPLETED);
+        jobRepository.saveAndFlush(job);
+
+        // Transition from COMPLETED to QUEUED is invalid
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put("/api/jobs/" + job.getId() + "/queue"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isConflict())
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.error").value("Conflict"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message").value("Invalid status transition from COMPLETED to QUEUED"));
+    }
+
+    @Test
+    public void testUnexpectedErrorSanitization() throws Exception {
+        // Build mock controller that throws a raw Exception to test fallback handler
+        @org.springframework.web.bind.annotation.RestController
+        class ExceptionThrowingController {
+            @org.springframework.web.bind.annotation.GetMapping("/api/throw")
+            public void throwException() throws Exception {
+                throw new Exception("Sensitive DB connection details or internal stack trace");
+            }
+        }
+
+        org.springframework.test.web.servlet.MockMvc exceptionMockMvc = org.springframework.test.web.servlet.setup.MockMvcBuilders
+                .standaloneSetup(new ExceptionThrowingController())
+                .setControllerAdvice(globalExceptionHandler)
+                .build();
+
+        exceptionMockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/throw"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isInternalServerError())
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.error").value("Internal Server Error"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message").value("An unexpected error occurred."));
+    }
+
+    @Test
+    public void testSwaggerOpenApiDocsPubliclyAccessible() throws Exception {
+        // Swagger UI / docs must bypass API key check
+        org.springframework.test.web.servlet.MockMvc localMockMvc = org.springframework.test.web.servlet.setup.MockMvcBuilders
+                .standaloneSetup(jobController)
+                .addInterceptors(apiKeyInterceptor)
+                .build();
+
+        localMockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/swagger-ui/index.html"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isNotFound()); // returns 404, but NOT 401 Unauthorized!
+
+        localMockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/v3/api-docs"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isNotFound()); // returns 404, but NOT 401 Unauthorized!
     }
 }
