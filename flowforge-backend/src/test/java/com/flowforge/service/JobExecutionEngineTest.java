@@ -863,4 +863,285 @@ public class JobExecutionEngineTest {
         mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/jobs/" + java.util.UUID.randomUUID() + "/cancel"))
                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isNotFound());
     }
+
+    @Test
+    public void testHigherPriorityJobClaimedFirst() {
+        CreateJobRequest reqA = new CreateJobRequest();
+        reqA.setName("job-priority-5");
+        reqA.setPriority(5);
+        reqA.setMaxRetries(1);
+        Job jobA = jobService.createJob(reqA);
+        jobService.queueJob(jobA.getId());
+
+        CreateJobRequest reqB = new CreateJobRequest();
+        reqB.setName("job-priority-10");
+        reqB.setPriority(10);
+        reqB.setMaxRetries(1);
+        Job jobB = jobService.createJob(reqB);
+        jobService.queueJob(jobB.getId());
+
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        assertEquals(1, claimed.size());
+        assertEquals(jobB.getId(), claimed.get(0).getId());
+    }
+
+    @Test
+    public void testFutureScheduledJobIsNotClaimed() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("job-future");
+        req.setPriority(10);
+        req.setMaxRetries(1);
+        req.setScheduledAt(LocalDateTime.now().plusHours(1));
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        List<Job> claimed = jobService.claimExecutableJobs(5, "worker-1");
+        assertTrue(claimed.isEmpty());
+    }
+
+    @Test
+    public void testScheduledJobBecomesClaimableAfterTime() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("job-future-claimable");
+        req.setPriority(10);
+        req.setMaxRetries(1);
+        req.setScheduledAt(LocalDateTime.now().plusHours(1));
+        Job job = jobService.createJob(req);
+        job = jobService.queueJob(job.getId());
+
+        // Verify it is not claimable initially
+        assertTrue(jobService.claimExecutableJobs(5, "worker-1").isEmpty());
+
+        // Manually move scheduledAt to the past
+        job.setScheduledAt(LocalDateTime.now().minusMinutes(5));
+        jobRepository.saveAndFlush(job);
+
+        // Verify it is now claimed successfully
+        List<Job> claimed = jobService.claimExecutableJobs(5, "worker-1");
+        assertEquals(1, claimed.size());
+        assertEquals(job.getId(), claimed.get(0).getId());
+    }
+
+    @Test
+    public void testPriorityOrderingAmongEligibleJobs() {
+        // Job A: Priority 5, created 10 mins ago
+        CreateJobRequest reqA = new CreateJobRequest();
+        reqA.setName("jobA");
+        reqA.setPriority(5);
+        reqA.setMaxRetries(1);
+        Job jobA = jobService.createJob(reqA);
+        jobA.setCreatedAt(LocalDateTime.now().minusMinutes(10));
+        jobRepository.saveAndFlush(jobA);
+        jobService.queueJob(jobA.getId());
+
+        // Job B: Priority 10, created 5 mins ago
+        CreateJobRequest reqB = new CreateJobRequest();
+        reqB.setName("jobB");
+        reqB.setPriority(10);
+        reqB.setMaxRetries(1);
+        Job jobB = jobService.createJob(reqB);
+        jobB.setCreatedAt(LocalDateTime.now().minusMinutes(5));
+        jobRepository.saveAndFlush(jobB);
+        jobService.queueJob(jobB.getId());
+
+        // Job C: Priority 5, created 20 mins ago (older)
+        CreateJobRequest reqC = new CreateJobRequest();
+        reqC.setName("jobC");
+        reqC.setPriority(5);
+        reqC.setMaxRetries(1);
+        Job jobC = jobService.createJob(reqC);
+        jobC.setCreatedAt(LocalDateTime.now().minusMinutes(20));
+        jobRepository.saveAndFlush(jobC);
+        jobService.queueJob(jobC.getId());
+
+        // Claiming all should return in order B (priority 10), C (priority 5, older), A (priority 5, newer)
+        List<Job> claimed = jobService.claimExecutableJobs(3, "worker-1");
+        assertEquals(3, claimed.size());
+        assertEquals(jobB.getId(), claimed.get(0).getId());
+        assertEquals(jobC.getId(), claimed.get(1).getId());
+        assertEquals(jobA.getId(), claimed.get(2).getId());
+    }
+
+    @Test
+    public void testRetrySchedulingRespectsScheduledAt() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("job-retry-sched");
+        req.setPriority(10);
+        req.setMaxRetries(2);
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        // Claim and fail to schedule retry
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        jobService.handleFailure(claimed.get(0).getId(), "worker-1", "failure message");
+
+        Job retryingJob = jobService.getJobById(job.getId());
+        assertEquals(JobStatus.RETRYING, retryingJob.getStatus());
+        assertNotNull(retryingJob.getScheduledAt());
+        assertTrue(retryingJob.getScheduledAt().isAfter(LocalDateTime.now()));
+
+        // Verify it cannot be claimed immediately
+        assertTrue(jobService.claimExecutableJobs(1, "worker-2").isEmpty());
+    }
+
+    @Test
+    public void testRetryingJobCompetesByPriorityAfterBecomingEligible() {
+        // High priority job in RETRYING state
+        CreateJobRequest reqA = new CreateJobRequest();
+        reqA.setName("jobA-retrying-high");
+        reqA.setPriority(10);
+        reqA.setMaxRetries(2);
+        Job jobA = jobService.createJob(reqA);
+        jobService.queueJob(jobA.getId());
+        
+        List<Job> claimedA = jobService.claimExecutableJobs(1, "worker-1");
+        jobService.handleFailure(claimedA.get(0).getId(), "worker-1", "failure message");
+
+        // Make the retrying job eligible now
+        Job retryingA = jobService.getJobById(jobA.getId());
+        retryingA.setScheduledAt(LocalDateTime.now().minusSeconds(1));
+        jobRepository.saveAndFlush(retryingA);
+
+        // Low priority job in QUEUED state
+        CreateJobRequest reqB = new CreateJobRequest();
+        reqB.setName("jobB-queued-low");
+        reqB.setPriority(2);
+        reqB.setMaxRetries(1);
+        Job jobB = jobService.createJob(reqB);
+        jobService.queueJob(jobB.getId());
+
+        // High priority retrying job should be claimed first
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-2");
+        assertEquals(1, claimed.size());
+        assertEquals(jobA.getId(), claimed.get(0).getId());
+    }
+
+    @Test
+    public void testPriorityDoesNotOverrideFutureSchedule() {
+        // Job A: Priority 100, scheduled in future
+        CreateJobRequest reqA = new CreateJobRequest();
+        reqA.setName("job-future-high");
+        reqA.setPriority(100);
+        reqA.setMaxRetries(1);
+        reqA.setScheduledAt(LocalDateTime.now().plusHours(1));
+        Job jobA = jobService.createJob(reqA);
+        jobService.queueJob(jobA.getId());
+
+        // Job B: Priority 1, scheduled in past (or immediate)
+        CreateJobRequest reqB = new CreateJobRequest();
+        reqB.setName("job-immediate-low");
+        reqB.setPriority(1);
+        reqB.setMaxRetries(1);
+        Job jobB = jobService.createJob(reqB);
+        jobService.queueJob(jobB.getId());
+
+        // Only Job B should be claimed
+        List<Job> claimed = jobService.claimExecutableJobs(2, "worker-1");
+        assertEquals(1, claimed.size());
+        assertEquals(jobB.getId(), claimed.get(0).getId());
+    }
+
+    @Test
+    public void testConcurrentWorkersRespectPriorityAndSkipLocked() {
+        CreateJobRequest req1 = new CreateJobRequest();
+        req1.setName("priority-1");
+        req1.setPriority(1);
+        req1.setMaxRetries(1);
+        Job job1 = jobService.createJob(req1);
+        jobService.queueJob(job1.getId());
+
+        CreateJobRequest req2 = new CreateJobRequest();
+        req2.setName("priority-5");
+        req2.setPriority(5);
+        req2.setMaxRetries(1);
+        Job job2 = jobService.createJob(req2);
+        jobService.queueJob(job2.getId());
+
+        CreateJobRequest req3 = new CreateJobRequest();
+        req3.setName("priority-10");
+        req3.setPriority(10);
+        req3.setMaxRetries(1);
+        Job job3 = jobService.createJob(req3);
+        jobService.queueJob(job3.getId());
+
+        // Worker 1 claims 1 job (gets priority 10)
+        List<Job> claimed1 = jobService.claimExecutableJobs(1, "worker-1");
+        assertEquals(1, claimed1.size());
+        assertEquals(job3.getId(), claimed1.get(0).getId());
+
+        // Worker 2 claims 1 job (gets priority 5, skips locked priority 10)
+        List<Job> claimed2 = jobService.claimExecutableJobs(1, "worker-2");
+        assertEquals(1, claimed2.size());
+        assertEquals(job2.getId(), claimed2.get(0).getId());
+    }
+
+    @Test
+    public void testLowPriorityJobDoesNotRemainPermanentlyStarved() {
+        // Job A: Priority 1, created 6 minutes ago (exceeds default starvation threshold of 300 seconds)
+        CreateJobRequest reqA = new CreateJobRequest();
+        reqA.setName("starved-job");
+        reqA.setPriority(1);
+        reqA.setMaxRetries(1);
+        Job jobA = jobService.createJob(reqA);
+        jobA.setCreatedAt(LocalDateTime.now().minusMinutes(6));
+        jobRepository.saveAndFlush(jobA);
+        jobService.queueJob(jobA.getId());
+
+        // Job B: Priority 100, created just now
+        CreateJobRequest reqB = new CreateJobRequest();
+        reqB.setName("fresh-high-priority-job");
+        reqB.setPriority(100);
+        reqB.setMaxRetries(1);
+        Job jobB = jobService.createJob(reqB);
+        jobService.queueJob(jobB.getId());
+
+        // Claiming 1 job should return Job A due to starvation override, despite Job B's high priority
+        List<Job> claimed = jobService.claimExecutableJobs(1, "worker-1");
+        assertEquals(1, claimed.size());
+        assertEquals(jobA.getId(), claimed.get(0).getId());
+    }
+
+    @Test
+    public void testExistingCancellationStillWorksWithScheduledJobs() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("job-to-cancel");
+        req.setPriority(10);
+        req.setMaxRetries(1);
+        req.setScheduledAt(LocalDateTime.now().plusHours(1));
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        // Cancel the scheduled job
+        Job cancelled = jobService.cancelJob(job.getId());
+        assertEquals(JobStatus.CANCELLED, cancelled.getStatus());
+        assertNull(cancelled.getScheduledAt());
+    }
+
+    @Test
+    public void testExistingRetryAndDLQBehaviorStillWorks() {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("job-dlq");
+        req.setPriority(10);
+        req.setMaxRetries(1);
+        Job job = jobService.createJob(req);
+        jobService.queueJob(job.getId());
+
+        // Claim and fail -> goes to RETRYING
+        List<Job> claimed1 = jobService.claimExecutableJobs(1, "worker-1");
+        jobService.handleFailure(claimed1.get(0).getId(), "worker-1", "err1");
+        Job state1 = jobService.getJobById(job.getId());
+        assertEquals(JobStatus.RETRYING, state1.getStatus());
+        assertEquals(1, state1.getRetryCount());
+
+        // Make it eligible
+        state1.setScheduledAt(LocalDateTime.now().minusSeconds(1));
+        jobRepository.saveAndFlush(state1);
+
+        // Claim and fail again -> goes to DEAD_LETTER (max retries = 1 exceeded)
+        List<Job> claimed2 = jobService.claimExecutableJobs(1, "worker-2");
+        jobService.handleFailure(claimed2.get(0).getId(), "worker-2", "err2");
+        Job state2 = jobService.getJobById(job.getId());
+        assertEquals(JobStatus.DEAD_LETTER, state2.getStatus());
+        assertEquals(2, state2.getRetryCount());
+    }
 }

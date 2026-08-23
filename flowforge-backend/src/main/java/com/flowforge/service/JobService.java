@@ -31,6 +31,9 @@ public class JobService {
     @Value("${flowforge.worker.lease-duration-ms:30000}")
     private long leaseDurationMs;
 
+    @Value("${flowforge.scheduler.starvation-threshold-seconds:300}")
+    private long starvationThresholdSeconds;
+
     public JobService(JobRepository jobRepository) {
         this.jobRepository = jobRepository;
     }
@@ -59,6 +62,7 @@ public class JobService {
 
         job.setCreatedAt(now);
         job.setUpdatedAt(now);
+        job.setScheduledAt(request.getScheduledAt());
 
         return jobRepository.save(job);
     }
@@ -85,7 +89,7 @@ public class JobService {
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public List<Job> claimExecutableJobs(int limit, String workerId) {
         LocalDateTime now = LocalDateTime.now();
-        List<Job> eligibleJobs = jobRepository.findExecutableJobsWithLock(now, limit);
+        List<Job> eligibleJobs = jobRepository.findExecutableJobsWithLock(now, limit, starvationThresholdSeconds);
         List<Job> claimedJobs = new ArrayList<>();
 
         for (Job job : eligibleJobs) {

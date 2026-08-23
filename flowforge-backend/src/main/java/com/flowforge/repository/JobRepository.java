@@ -15,12 +15,20 @@ import org.springframework.data.jpa.repository.Modifying;
 public interface JobRepository extends JpaRepository<Job, UUID> {
 
     @Query(value = "SELECT * FROM jobs " +
-                   "WHERE status = 'QUEUED' OR (status = 'RETRYING' AND (scheduled_at IS NULL OR scheduled_at <= :now)) " +
-                   "ORDER BY priority DESC, created_at ASC " +
+                   "WHERE (status = 'QUEUED' OR status = 'RETRYING') " +
+                   "  AND (scheduled_at IS NULL OR scheduled_at <= :now) " +
+                   "ORDER BY " +
+                   "  CASE WHEN EXTRACT(EPOCH FROM (:now - COALESCE(scheduled_at, created_at))) > :starvationThresholdSeconds THEN 1 ELSE 0 END DESC, " +
+                   "  priority DESC, " +
+                   "  COALESCE(scheduled_at, created_at) ASC, " +
+                   "  id ASC " +
                    "LIMIT :limit " +
                    "FOR UPDATE SKIP LOCKED", 
            nativeQuery = true)
-    List<Job> findExecutableJobsWithLock(@Param("now") LocalDateTime now, @Param("limit") int limit);
+    List<Job> findExecutableJobsWithLock(
+            @Param("now") LocalDateTime now, 
+            @Param("limit") int limit,
+            @Param("starvationThresholdSeconds") long starvationThresholdSeconds);
 
     @Modifying
     @Query("UPDATE Job j SET j.leaseUntil = :newLeaseUntil, j.updatedAt = :now " +

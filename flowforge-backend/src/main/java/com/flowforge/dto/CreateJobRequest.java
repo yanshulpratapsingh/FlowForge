@@ -21,7 +21,17 @@ public class CreateJobRequest {
 
     private String type;
 
+    private java.time.LocalDateTime scheduledAt;
+
     public CreateJobRequest() {
+    }
+
+    public java.time.LocalDateTime getScheduledAt() {
+        return scheduledAt;
+    }
+
+    public void setScheduledAt(java.time.LocalDateTime scheduledAt) {
+        this.scheduledAt = scheduledAt;
     }
 
     public String getName() {
