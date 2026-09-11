@@ -169,7 +169,7 @@ export default function CreateJob() {
             borderRadius: '0.75rem',
             border: '1px solid #e5e7eb',
             boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05)',
-            padding: '2.5rem',
+            padding: 'clamp(1.25rem, 4vw, 2.5rem)',
           }}
         >
           <div
@@ -437,7 +437,7 @@ export default function CreateJob() {
           borderRadius: '0.75rem',
           border: '1px solid #e5e7eb',
           boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05)',
-          padding: '2rem 2.5rem',
+          padding: 'clamp(1.25rem, 4vw, 2.5rem)',
         }}
       >
         <div style={{ marginBottom: '1.75rem', borderBottom: '1px solid #f3f4f6', paddingBottom: '1rem' }}>

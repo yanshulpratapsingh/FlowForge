@@ -16,3 +16,83 @@ body {
 * {
   box-sizing: border-box;
 }
+
+/* Global Keyframe Animations */
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.spin-anim {
+  animation: spin 1s linear infinite;
+}
+
+/* Focus and Interactive Enhancements */
+input:focus, select:focus, textarea:focus {
+  border-color: #2563eb !important;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
+button:focus-visible, a:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+/* Responsive Navigation & Shell */
+.desktop-sidebar {
+  width: 260px;
+  background-color: #1f2937;
+  color: #ffffff;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+  flex-shrink: 0;
+}
+
+.desktop-header {
+  height: 64px;
+  background-color: #ffffff;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  align-items: center;
+  padding: 0 2rem;
+  justify-content: space-between;
+}
+
+.mobile-nav-bar {
+  display: none;
+  height: 56px;
+  background-color: #1f2937;
+  color: #ffffff;
+  padding: 0 1rem;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #374151;
+  position: sticky;
+  top: 0;
+  z-index: 30;
+}
+
+.app-main-viewport {
+  flex: 1;
+  padding: 2rem;
+  overflow-y: auto;
+  max-width: 1400px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+@media (max-width: 768px) {
+  .desktop-sidebar {
+    display: none;
+  }
+  .desktop-header {
+    display: none;
+  }
+  .mobile-nav-bar {
+    display: flex;
+  }
+  .app-main-viewport {
+    padding: 1rem !important;
+  }
+}

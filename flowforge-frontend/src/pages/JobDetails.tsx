@@ -343,6 +343,7 @@ export default function JobDetails() {
           </div>
           <button
             onClick={() => setFeedback(null)}
+            aria-label="Dismiss notification"
             style={{
               background: 'none',
               border: 'none',
@@ -455,6 +456,7 @@ export default function JobDetails() {
               <button
                 onClick={handleCopyId}
                 title="Copy Job ID"
+                aria-label="Copy Job ID to clipboard"
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',

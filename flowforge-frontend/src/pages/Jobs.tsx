@@ -314,6 +314,7 @@ export default function Jobs() {
           </div>
           <button
             onClick={() => setFeedback(null)}
+            aria-label="Dismiss notification"
             style={{
               background: 'none',
               border: 'none',
@@ -361,7 +362,7 @@ export default function Jobs() {
             }}
           >
             {/* Search Input */}
-            <div style={{ position: 'relative', minWidth: '240px', flex: '1 1 240px' }}>
+            <div style={{ position: 'relative', minWidth: 'min(100%, 200px)', flex: '1 1 200px' }}>
               <Search
                 size={16}
                 color="#9ca3af"
@@ -372,6 +373,7 @@ export default function Jobs() {
                 value={searchQuery}
                 onChange={(e: ChangeEvent<HTMLInputElement>) => setSearchQuery(e.target.value)}
                 placeholder="Search by job name, ID, or type..."
+                aria-label="Search jobs by name, ID, or type"
                 style={{
                   width: '100%',
                   padding: '0.45rem 0.75rem 0.45rem 2.25rem',
@@ -391,6 +393,7 @@ export default function Jobs() {
                 <select
                   value={statusFilter}
                   onChange={(e: ChangeEvent<HTMLSelectElement>) => setStatusFilter(e.target.value)}
+                  aria-label="Filter jobs by status"
                   style={{
                     padding: '0.4rem 0.6rem',
                     border: '1px solid #d1d5db',
@@ -418,6 +421,7 @@ export default function Jobs() {
                   <select
                     value={typeFilter}
                     onChange={(e: ChangeEvent<HTMLSelectElement>) => setTypeFilter(e.target.value)}
+                    aria-label="Filter jobs by type"
                     style={{
                       padding: '0.4rem 0.6rem',
                       border: '1px solid #d1d5db',
