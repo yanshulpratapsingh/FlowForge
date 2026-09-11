@@ -25,13 +25,24 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     defaultHeaders['X-API-KEY'] = API_KEY;
   }
 
-  const response = await fetch(url, {
-    headers: {
-      ...defaultHeaders,
-      ...headers,
-    },
-    ...restOptions,
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: {
+        ...defaultHeaders,
+        ...headers,
+      },
+      ...restOptions,
+    });
+  } catch {
+    const details: ApiErrorDetail = {
+      timestamp: new Date().toISOString(),
+      status: 0,
+      error: 'NetworkError',
+      message: 'Cannot connect to FlowForge backend. Check that the backend is running on port 8081 and CORS is configured.',
+    };
+    throw new ApiError(0, details);
+  }
 
   if (!response.ok) {
     let details: ApiErrorDetail;
