@@ -263,7 +263,7 @@ flowforge.worker.recovery-interval-ms=5000
 
 ```env
 VITE_API_BASE_URL=http://localhost:8081
-VITE_API_KEY=flowforge-dev-secret-key-12345
+VITE_API_KEY=your_api_key_here
 ```
 
 ---
@@ -290,7 +290,7 @@ CREATE DATABASE flowforge;
 cd flowforge-backend
 
 # Set environment variables (or rely on defaults in application.properties)
-export FLOWFORGE_API_KEY="flowforge-dev-secret-key-12345"
+export FLOWFORGE_API_KEY="your_api_key_here"
 export DB_USERNAME="postgres"
 export DB_PASSWORD="your_password"
 
