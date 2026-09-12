@@ -10,7 +10,7 @@
 [![Vite](https://img.shields.io/badge/Vite-8.x-purple.svg)](https://vitejs.dev/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-FlowForge is a production-inspired distributed job orchestration engine designed for reliable, transactional workload scheduling and execution across distributed worker threads. By leveraging PostgreSQL transactional row-level locking (FOR UPDATE SKIP LOCKED) and advisory locks (pg_advisory_xact_lock), FlowForge prevents race conditions during job claiming while providing heartbeat-based worker lease tracking, automated crash recovery, exponential backoff retries, dead-letter queue (DLQ) containment, and real-time observability telemetry.
+FlowForge is a production-inspired distributed job orchestration engine designed for reliable, transactional workload scheduling and execution across distributed worker threads. By leveraging PostgreSQL transactional row-level locking (`FOR UPDATE SKIP LOCKED`) and advisory locks (`pg_advisory_xact_lock`), FlowForge prevents race conditions during job claiming while providing heartbeat-based worker lease tracking, automated crash recovery, exponential backoff retries, dead-letter queue (DLQ) containment, and real-time observability telemetry.
 
 ---
 
