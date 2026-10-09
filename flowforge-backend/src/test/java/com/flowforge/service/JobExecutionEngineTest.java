@@ -1889,20 +1889,44 @@ public class JobExecutionEngineTest {
                 .addInterceptors(apiKeyInterceptor)
                 .build();
 
-        // 1. Missing API Key header -> Expect 401
+        // 1. Missing API Key header -> Expect canonical 401 ErrorResponse
         localMockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/jobs"))
                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isUnauthorized())
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content().contentType("application/json;charset=UTF-8"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.status").value(401))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.error").value("Unauthorized"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message").value("Missing or invalid API key"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.timestamp").exists());
+
+        // 2. Invalid API Key header -> Expect canonical 401 ErrorResponse and no key leakage
+        String invalidResponse = localMockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/jobs")
+                .header("X-API-KEY", "wrong-key-123"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isUnauthorized())
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content().contentType("application/json;charset=UTF-8"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.status").value(401))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.error").value("Unauthorized"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message").value("Missing or invalid API key"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.timestamp").exists())
+               .andReturn().getResponse().getContentAsString();
+
+        assertFalse(invalidResponse.contains("wrong-key-123"));
+        assertFalse(invalidResponse.contains("test-api-key"));
+
+        // 3. Empty API Key header -> Expect canonical 401 ErrorResponse
+        localMockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/jobs")
+                .header("X-API-KEY", ""))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isUnauthorized())
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.status").value(401))
                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.error").value("Unauthorized"))
                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message").value("Missing or invalid API key"));
 
-        // 2. Invalid API Key header -> Expect 401
-        localMockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/jobs")
-                .header("X-API-KEY", "wrong-key-123"))
-               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isUnauthorized());
-
-        // 3. Valid API Key header -> Expect 200
+        // 4. Valid API Key header -> Expect 200 OK
         localMockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/jobs")
                 .header("X-API-KEY", "test-api-key"))
+               .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
+
+        // 5. OPTIONS preflight -> Bypasses API key validation
+        localMockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options("/api/jobs"))
                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
     }
 
@@ -1964,5 +1988,110 @@ public class JobExecutionEngineTest {
 
         localMockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/v3/api-docs"))
                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isNotFound()); // returns 404, but NOT 401 Unauthorized!
+    }
+
+    @Test
+    public void testJobResponseContractForCreateAndGetEndpoints() throws Exception {
+        String jobJson = "{\"name\":\"contract-job\",\"payload\":\"contract-payload\",\"priority\":5,\"maxRetries\":3,\"type\":\"CONTRACT_TYPE\",\"scheduledAt\":\"2026-12-01T10:00:00\"}";
+
+        // 1. POST /api/jobs -> 201 Created with all 16 fields
+        String responseContent = mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/jobs")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content(jobJson))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isCreated())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.id").exists())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.name").value("contract-job"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.payload").value("contract-payload"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.priority").value(5))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.status").value("CREATED"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.retryCount").value(0))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.maxRetries").value(3))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.createdAt").exists())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.updatedAt").exists())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.scheduledAt").value("2026-12-01T10:00:00"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.type").value("CONTRACT_TYPE"))
+                .andReturn().getResponse().getContentAsString();
+
+        // Extract ID
+        com.fasterxml.jackson.databind.JsonNode rootNode = new com.fasterxml.jackson.databind.ObjectMapper().readTree(responseContent);
+        String jobId = rootNode.get("id").asText();
+
+        // 2. GET /api/jobs/{id} -> 200 OK with all 16 fields
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/jobs/" + jobId))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.id").value(jobId))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.name").value("contract-job"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.payload").value("contract-payload"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.priority").value(5))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.status").value("CREATED"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.retryCount").value(0))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.maxRetries").value(3))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.createdAt").exists())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.updatedAt").exists())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.scheduledAt").value("2026-12-01T10:00:00"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.type").value("CONTRACT_TYPE"));
+    }
+
+    @Test
+    public void testJobResponseContractForListQueueAndCancelEndpoints() throws Exception {
+        CreateJobRequest req = new CreateJobRequest();
+        req.setName("lifecycle-contract-job");
+        req.setPriority(2);
+        req.setMaxRetries(2);
+        Job job = jobService.createJob(req);
+
+        // 1. GET /api/jobs -> 200 OK JSON Array
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/jobs"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$").isArray())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$[0].id").exists())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$[0].status").exists());
+
+        // 2. PUT /api/jobs/{id}/queue -> 200 OK with status QUEUED
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put("/api/jobs/" + job.getId() + "/queue"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.id").value(job.getId().toString()))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.status").value("QUEUED"));
+
+        // 3. POST /api/jobs/{id}/cancel -> 200 OK with status CANCELLED
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/jobs/" + job.getId() + "/cancel"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.id").value(job.getId().toString()))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.status").value("CANCELLED"));
+    }
+
+    @Test
+    public void testMalformedJsonReturns400BadRequest() throws Exception {
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/jobs")
+                .header("X-API-KEY", "test-api-key")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content("{ \"name\": "))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isBadRequest())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.status").value(400))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.error").value("Bad Request"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message").value("Malformed or unreadable JSON request body."))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.timestamp").exists());
+    }
+
+    @Test
+    public void testUnsupportedHttpMethodReturns405MethodNotAllowed() throws Exception {
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch("/api/jobs")
+                .header("X-API-KEY", "test-api-key"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isMethodNotAllowed())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.status").value(405))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.error").value("Method Not Allowed"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message").value("HTTP method 'PATCH' is not supported for this endpoint."))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.timestamp").exists());
+    }
+
+    @Test
+    public void testMethodArgumentTypeMismatchReturns400BadRequest() throws Exception {
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/jobs/not-a-valid-uuid")
+                .header("X-API-KEY", "test-api-key"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isBadRequest())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.status").value(400))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.error").value("Bad Request"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message").value("Invalid parameter type: id"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.timestamp").exists());
     }
 }

@@ -1,7 +1,7 @@
 package com.flowforge.controller;
 
 import com.flowforge.dto.CreateJobRequest;
-import com.flowforge.entity.Job;
+import com.flowforge.dto.JobResponse;
 import com.flowforge.service.JobService;
 
 import jakarta.validation.Valid;
@@ -24,27 +24,29 @@ public class JobController {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    public Job createJob(@Valid @RequestBody CreateJobRequest request) {
-        return jobService.createJob(request);
+    public JobResponse createJob(@Valid @RequestBody CreateJobRequest request) {
+        return JobResponse.from(jobService.createJob(request));
     }
 
     @GetMapping
-    public List<Job> getAllJobs() {
-        return jobService.getAllJobs();
+    public List<JobResponse> getAllJobs() {
+        return jobService.getAllJobs().stream()
+                .map(JobResponse::from)
+                .toList();
     }
 
     @GetMapping("/{id}")
-    public Job getJobById(@PathVariable UUID id) {
-        return jobService.getJobById(id);
+    public JobResponse getJobById(@PathVariable UUID id) {
+        return JobResponse.from(jobService.getJobById(id));
     }
 
     @PutMapping("/{id}/queue")
-    public Job queueJob(@PathVariable UUID id) {
-        return jobService.queueJob(id);
+    public JobResponse queueJob(@PathVariable UUID id) {
+        return JobResponse.from(jobService.queueJob(id));
     }
 
     @PostMapping("/{id}/cancel")
-    public Job cancelJob(@PathVariable UUID id) {
-        return jobService.cancelJob(id);
+    public JobResponse cancelJob(@PathVariable UUID id) {
+        return JobResponse.from(jobService.cancelJob(id));
     }
 }

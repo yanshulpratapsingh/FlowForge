@@ -499,10 +499,13 @@ export default function JobDetails() {
 
           <div>
             <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Retry Attempts
+              Execution Attempts
             </span>
             <div style={{ fontSize: '1.25rem', fontWeight: 700, color: '#111827', marginTop: '0.2rem' }}>
-              {job.retryCount} <span style={{ fontSize: '0.875rem', fontWeight: 400, color: '#6b7280' }}>/ {job.maxRetries} max</span>
+              {job.retryCount} <span style={{ fontSize: '0.875rem', fontWeight: 400, color: '#6b7280' }}>/ {job.maxRetries + 1} allowed attempts</span>
+            </div>
+            <div style={{ fontSize: '0.75rem', color: '#6b7280', marginTop: '0.2rem' }}>
+              (1 initial + {job.maxRetries} {job.maxRetries === 1 ? 'retry' : 'retries'} max)
             </div>
           </div>
 

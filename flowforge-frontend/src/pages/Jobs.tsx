@@ -488,7 +488,7 @@ export default function Jobs() {
                       Status
                     </th>
                     <th style={{ padding: '0.75rem 1rem', fontWeight: 600, fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                      Retries
+                      Failed Attempts
                     </th>
                     <th style={{ padding: '0.75rem 1rem', fontWeight: 600, fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                       Timeline
@@ -596,9 +596,12 @@ export default function Jobs() {
                           </span>
                         </td>
 
-                        {/* Retries */}
-                        <td style={{ padding: '0.875rem 1rem', verticalAlign: 'middle', color: '#4b5563', fontSize: '0.8125rem' }}>
-                          {job.retryCount} / {job.maxRetries}
+                        {/* Failed Attempts */}
+                        <td
+                          style={{ padding: '0.875rem 1rem', verticalAlign: 'middle', color: '#4b5563', fontSize: '0.8125rem' }}
+                          title={`${job.retryCount} of ${job.maxRetries + 1} allowed attempts (1 initial + ${job.maxRetries} max ${job.maxRetries === 1 ? 'retry' : 'retries'})`}
+                        >
+                          {job.retryCount} / {job.maxRetries + 1}
                         </td>
 
                         {/* Timeline */}
